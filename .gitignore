@@ -1,0 +1,13 @@
+# Node dependencies
+node_modules/
+.pnpm-debug.log
+dist/
+
+# Python virtual environments and cache
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local environment configuration (Contains passwords!)
+.env
