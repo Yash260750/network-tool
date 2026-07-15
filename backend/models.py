@@ -139,8 +139,20 @@ class Port(Base):
     notes: Mapped[str | None] = mapped_column(Text)
 
     device: Mapped["Device"] = relationship(back_populates="ports")
-    connections_a: Mapped[list["Connection"]] = relationship(foreign_keys="Connection.port_a_id", back_populates="port_a")
-    connections_b: Mapped[list["Connection"]] = relationship(foreign_keys="Connection.port_b_id", back_populates="port_b")
+    
+    # Added cascade="all, delete-orphan" to both relationships
+    connections_a: Mapped[list["Connection"]] = relationship(
+        "Connection", 
+        foreign_keys="Connection.port_a_id", 
+        back_populates="port_a",
+        cascade="all, delete-orphan"
+    )
+    connections_b: Mapped[list["Connection"]] = relationship(
+        "Connection", 
+        foreign_keys="Connection.port_b_id", 
+        back_populates="port_b",
+        cascade="all, delete-orphan"
+    )
 
     @property
     def all_connections(self) -> list["Connection"]:

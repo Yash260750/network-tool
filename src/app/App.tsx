@@ -1214,9 +1214,12 @@ export default function App() {
   const [traceTarget, setTraceTarget] = useState<Device | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchDevices = async () => {
+  // Pass an options parameter to determine whether we show the heavy global loading screen
+  const fetchDevices = async (isInitial = false) => {
     try {
-      setLoading(true);
+      if (isInitial) {
+        setLoading(true);
+      }
       const response = await axios.get(`${API_BASE_URL}/devices/`);
       
       const mappedDevices = response.data.map((d: any) => ({
@@ -1228,6 +1231,7 @@ export default function App() {
         mac: d.mac_address,
         vlan: d.vlan,
         owner: d.owner,
+        // Fallbacks to prevent rendering layout breakage or schema mismatches
         room: d.room_id ? `Room ${d.room_id}` : d.room || "—",
         floor: d.floor || 1,
         rack: d.rack_id ? `Rack ${d.rack_id}` : d.rack || undefined,
@@ -1241,16 +1245,19 @@ export default function App() {
     } catch (error) {
       console.error("Error fetching operational devices array sequence:", error);
     } finally {
-      setLoading(false);
+      if (isInitial) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    fetchDevices();
+    fetchDevices(true);
   }, []);
 
   const updateDevice = async (id: string, patch: Partial<Device>) => {
     try {
+      // Map frontend fields back cleanly without breaking backend column names
       const payload = {
         name: patch.name,
         device_type: patch.type,
@@ -1268,10 +1275,11 @@ export default function App() {
         wall_jack: patch.wallJack,
       };
 
+      // Ensure undefined fields are stripped out completely
       Object.keys(payload).forEach(key => (payload as any)[key] === undefined && delete (payload as any)[key]);
 
       await axios.patch(`${API_BASE_URL}/devices/${id}`, payload);
-      await fetchDevices();
+      await fetchDevices(false); // Silent background synchronization update
     } catch (error) {
       console.error("Failed to commit network parameter edits back to persistent storage:", error);
     }
@@ -1280,37 +1288,50 @@ export default function App() {
   const deleteDevice = async (id: string) => {
     try {
       await axios.delete(`${API_BASE_URL}/devices/${id}`);
-      await fetchDevices();
+      await fetchDevices(false); // Silent background synchronization update
     } catch (error) {
       console.error("Failed to delete network asset:", error);
     }
   };
 
-  const createDevice = async (newDevice: Omit<Device, "id">) => {
-    try {
-      const payload = {
-        name: newDevice.name,
-        device_type: newDevice.type,
-        hostname: newDevice.hostname,
-        ip_address: newDevice.ip,
-        mac_address: newDevice.mac,
-        vlan: newDevice.vlan,
-        owner: newDevice.owner,
-        status: newDevice.status,
-        room: newDevice.room,
-        floor: newDevice.floor,
-        rack: newDevice.rack,
-        switch_port: newDevice.switchPort,
-        patch_panel: newDevice.patchPanel,
-        wall_jack: newDevice.wallJack,
-      };
-
-      await axios.post(`${API_BASE_URL}/devices/`, payload);
-      await fetchDevices();
-    } catch (error) {
-      console.error("Failed to add new network asset:", error);
-    }
+const createDevice = async (newDevice: Omit<Device, "id">) => {
+  // Helper to sanitize fields: converts empty strings to null
+  const clean = (val: any) => (val === "" || val === undefined || val === null ? null : val);
+  const cleanInt = (val: any) => {
+    const parsed = parseInt(val);
+    return isNaN(parsed) ? null : parsed;
   };
+
+  const payload = {
+    name: newDevice.name,
+    device_type: newDevice.type,
+    status: newDevice.status,
+    hostname: clean(newDevice.hostname),
+    ip_address: clean(newDevice.ip),
+    mac_address: clean(newDevice.mac),
+    owner: clean(newDevice.owner),
+    room: clean(newDevice.room),
+    rack: clean(newDevice.rack),
+    switch_port: clean(newDevice.switchPort),
+    patch_panel: clean(newDevice.patchPanel),
+    wall_jack: clean(newDevice.wallJack),
+    vlan: cleanInt(newDevice.vlan),
+    floor: cleanInt(newDevice.floor),
+  };
+
+  try {
+    await axios.post(`${API_BASE_URL}/devices/`, payload);
+    await fetchDevices(false);
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 422) {
+      console.error("Validation Error Details:", error.response.data.detail);
+      // Optional: alert user which field failed
+      alert(`Invalid data provided: ${JSON.stringify(error.response.data.detail[0].loc)}`);
+    } else {
+      console.error("Failed to add device:", error);
+    }
+  }
+};
 
   const navigateToTrace = (dev: Device) => {
     setTraceTarget(dev);
