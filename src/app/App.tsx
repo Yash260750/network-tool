@@ -4,8 +4,9 @@ import {
   Monitor, Printer, Wifi, Phone, Camera, Cable,
   Activity, Box, Zap, AlertTriangle,
   CheckCircle2, Circle, ArrowDown, X, Menu,
-  Shield, Plug, Info, Pencil, Save, ChevronDown
+  Shield, Plug, Info, Pencil, Save, ChevronDown, Layers, Plus, Upload, RotateCcw, Trash2
 } from "lucide-react";
+import axios from "axios";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -43,61 +44,67 @@ interface TraceNode {
 
 const DeviceContext = createContext<{
   devices: Device[];
-  updateDevice: (id: string, patch: Partial<Device>) => void;
-}>({ devices: [], updateDevice: () => {} });
+  updateDevice: (id: string, patch: Partial<Device>) => Promise<void>;
+  deleteDevice: (id: string) => Promise<void>;
+  createDevice: (device: Omit<Device, "id">) => Promise<void>;
+}>({ devices: [], updateDevice: async () => {}, deleteDevice: async () => {}, createDevice: async () => {} });
 
 const useDevices = () => useContext(DeviceContext);
 
-// ─── Initial Data ─────────────────────────────────────────────────────────────
-
-const INITIAL_DEVICES: Device[] = [
-  { id: "d1", name: "PC-104", type: "pc", hostname: "wks-104.corp.local", ip: "10.10.1.104", mac: "A4:C3:F0:85:2B:11", vlan: 10, owner: "Sarah Mitchell", room: "Office 204", floor: 2, status: "online", switchPort: "Gi1/0/18", patchPanel: "PP-A Port 18", wallJack: "WJ-A12" },
-  { id: "d2", name: "PC-105", type: "pc", hostname: "wks-105.corp.local", ip: "10.10.1.105", mac: "A4:C3:F0:85:2C:22", vlan: 10, owner: "James Okafor", room: "Office 205", floor: 2, status: "online", switchPort: "Gi1/0/19", patchPanel: "PP-A Port 19", wallJack: "WJ-A13" },
-  { id: "d3", name: "PC-201", type: "pc", hostname: "wks-201.corp.local", ip: "10.10.2.201", mac: "B4:D3:E0:11:3A:44", vlan: 20, owner: "Lena Braun", room: "Office 301", floor: 3, status: "warning", switchPort: "Gi1/0/4", patchPanel: "PP-B Port 4", wallJack: "WJ-B04" },
-  { id: "d4", name: "PRT-F2-01", type: "printer", hostname: "printer-f2-01.corp.local", ip: "10.10.1.200", mac: "C8:E0:FF:12:44:AB", vlan: 10, owner: "IT Dept", room: "Print Room F2", floor: 2, status: "online", switchPort: "Gi1/0/24", patchPanel: "PP-A Port 24", wallJack: "WJ-A20" },
-  { id: "d5", name: "AP-F2-NW", type: "ap", hostname: "ap-f2-nw.corp.local", ip: "10.10.5.11", mac: "E8:48:B8:C0:1A:2F", vlan: 50, owner: "IT Dept", room: "Open Space NW", floor: 2, status: "online", switchPort: "Gi1/0/36", patchPanel: "PP-A Port 36", wallJack: "WJ-A30" },
-  { id: "d6", name: "AP-F2-SE", type: "ap", hostname: "ap-f2-se.corp.local", ip: "10.10.5.12", mac: "E8:48:B8:C0:1A:3F", vlan: 50, owner: "IT Dept", room: "Open Space SE", floor: 2, status: "online", switchPort: "Gi1/0/37", patchPanel: "PP-A Port 37", wallJack: "WJ-A31" },
-  { id: "d7", name: "CAM-LOBBY", type: "camera", hostname: "cam-lobby.corp.local", ip: "10.10.8.1", mac: "00:0A:E4:12:88:CC", vlan: 80, owner: "Security", room: "Lobby", floor: 1, status: "online", switchPort: "Gi2/0/1", patchPanel: "PP-C Port 1", wallJack: "WJ-C01" },
-  { id: "d8", name: "IP-204-A", type: "ip_phone", hostname: "phone-204a.corp.local", ip: "10.10.3.104", mac: "F0:9F:C2:AB:11:22", vlan: 30, owner: "Sarah Mitchell", room: "Office 204", floor: 2, status: "online", switchPort: "Gi1/0/18", patchPanel: "PP-A Port 18", wallJack: "WJ-A12" },
-  { id: "d9", name: "SRV-APP-01", type: "server", hostname: "srv-app-01.corp.local", ip: "10.10.100.10", mac: "00:25:90:FA:BB:01", vlan: 100, owner: "IT Dept", room: "Server Room", floor: 1, rack: "Rack-A", status: "online" },
-  { id: "d10", name: "SRV-DB-01", type: "server", hostname: "srv-db-01.corp.local", ip: "10.10.100.20", mac: "00:25:90:FA:BB:02", vlan: 100, owner: "IT Dept", room: "Server Room", floor: 1, rack: "Rack-A", status: "online" },
-  { id: "d11", name: "PC-106", type: "pc", hostname: "wks-106.corp.local", ip: "10.10.1.106", mac: "A4:C3:F0:85:2D:33", vlan: 10, owner: "Tom Eriksen", room: "Office 206", floor: 2, status: "offline", switchPort: "Gi1/0/20", patchPanel: "PP-A Port 20", wallJack: "WJ-A14" },
-];
-
+// Dynamically builds trace paths using only database contents instead of hardcoded fallback strings
 const buildTracePaths = (devices: Device[]): Record<string, TraceNode[]> => {
-  const byId = Object.fromEntries(devices.map(d => [d.id, d]));
-  return {
-    "d1": (() => { const d = byId["d1"]; return [
-      { id: "t1", label: d.name, sublabel: d.hostname, type: d.type, detail: `${d.ip} · VLAN ${d.vlan} · ${d.room}` },
-      { id: "t2", label: d.wallJack || "WJ-A12", sublabel: `${d.room}, Floor ${d.floor}`, type: "wall_jack", detail: "RJ45 · Cat6" },
-      { id: "t3", label: d.patchPanel || "PP-A Port 18", sublabel: "Rack-A · U22", type: "patch_panel", detail: "Cat6 · 2m blue" },
-      { id: "t4", label: `Switch-A · ${d.switchPort || "Gi1/0/18"}`, sublabel: "Rack-A · U14", type: "switch", detail: `VLAN ${d.vlan} access · 1Gbps · Up` },
-      { id: "t5", label: "Distribution Switch DS-1", sublabel: "Rack-A · U2", type: "switch", detail: "Uplink Gi0/1 → Core · 10Gbps" },
-      { id: "t6", label: "Core Switch CS-1", sublabel: "Rack-A · U1", type: "switch", detail: "Backbone · 40Gbps · Uptime 847d" },
-    ]; })(),
-    "d3": (() => { const d = byId["d3"]; return [
-      { id: "t1", label: d.name, sublabel: d.hostname, type: d.type, detail: `${d.ip} · VLAN ${d.vlan} · ${d.room}` },
-      { id: "t2", label: d.wallJack || "WJ-B04", sublabel: `${d.room}, Floor ${d.floor}`, type: "wall_jack", detail: "RJ45 · Cat5e" },
-      { id: "t3", label: d.patchPanel || "PP-B Port 4", sublabel: "Rack-B · U20", type: "patch_panel", detail: "Cat5e · 3m yellow" },
-      { id: "t4", label: `Switch-B · ${d.switchPort || "Gi1/0/4"}`, sublabel: "Rack-B · U12", type: "switch", detail: `VLAN ${d.vlan} access · 100Mbps · Degraded` },
-      { id: "t5", label: "Distribution Switch DS-2", sublabel: "Rack-B · U2", type: "switch", detail: "Uplink Gi0/2 → Core · 10Gbps" },
-      { id: "t6", label: "Core Switch CS-1", sublabel: "Rack-A · U1", type: "switch", detail: "Backbone · 40Gbps · Uptime 847d" },
-    ]; })(),
-  };
-};
+  const paths: Record<string, TraceNode[]> = {};
 
-const RACK_DEVICES = [
-  { name: "Core Switch CS-1", type: "switch" as DeviceType, units: 1, position: 1, color: "#22d3ee", ip: "10.10.0.1", status: "online" as Status },
-  { name: "Dist. Switch DS-1", type: "switch" as DeviceType, units: 1, position: 2, color: "#22d3ee", ip: "10.10.0.2", status: "online" as Status },
-  { name: "Firewall FW-01", type: "firewall" as DeviceType, units: 2, position: 3, color: "#f43f5e", ip: "10.10.0.254", status: "online" as Status },
-  { name: "Switch-A", type: "switch" as DeviceType, units: 1, position: 5, color: "#22d3ee", ip: "10.10.0.10", status: "online" as Status },
-  { name: "Switch-B", type: "switch" as DeviceType, units: 1, position: 6, color: "#22d3ee", ip: "10.10.0.11", status: "online" as Status },
-  { name: "Patch Panel PP-A", type: "patch_panel" as DeviceType, units: 1, position: 7, color: "#a78bfa", ip: "—", status: "online" as Status },
-  { name: "Patch Panel PP-B", type: "patch_panel" as DeviceType, units: 1, position: 8, color: "#a78bfa", ip: "—", status: "online" as Status },
-  { name: "SRV-APP-01", type: "server" as DeviceType, units: 2, position: 9, color: "#10b981", ip: "10.10.100.10", status: "online" as Status },
-  { name: "SRV-DB-01", type: "server" as DeviceType, units: 2, position: 11, color: "#10b981", ip: "10.10.100.20", status: "online" as Status },
-  { name: "UPS-01", type: "ups" as DeviceType, units: 3, position: 13, color: "#f59e0b", ip: "—", status: "online" as Status },
-];
+  devices.forEach(d => {
+    const hops: TraceNode[] = [];
+
+    // Hop 1: The Device Endpoint itself
+    hops.push({
+      id: `${d.id}-endpoint`,
+      label: d.name || "Unknown Asset",
+      sublabel: d.hostname || "No Hostname",
+      type: d.type,
+      detail: `${d.ip || "No IP"} · VLAN ${d.vlan || 0} · Room: ${d.room || "—"}`
+    });
+
+    // Hop 2: Terminal Wall Jack (Only added if present in database)
+    if (d.wallJack && d.wallJack.trim() !== "") {
+      hops.push({
+        id: `${d.id}-wj`,
+        label: d.wallJack,
+        sublabel: `Room ${d.room || "—"}, Floor ${d.floor || 1}`,
+        type: "wall_jack" as DeviceType,
+        detail: "RJ45 · Cat6 Connection"
+      });
+    }
+
+    // Hop 3: Distribution Patch Panel (Only added if present in database)
+    if (d.patchPanel && d.patchPanel.trim() !== "") {
+      hops.push({
+        id: `${d.id}-pp`,
+        label: d.patchPanel,
+        sublabel: d.rack || "Infrastructure Location",
+        type: "patch_panel" as DeviceType,
+        detail: "Patch Bay Interface Link"
+      });
+    }
+
+    // Hop 4: Core/Distribution Network Switch Interface (Only added if present in database)
+    if (d.switchPort && d.switchPort.trim() !== "") {
+      hops.push({
+        id: `${d.id}-sw`,
+        label: `Switch Port: ${d.switchPort}`,
+        sublabel: d.rack || "Network Enclosure Cabinet",
+        type: "switch" as DeviceType,
+        detail: `VLAN Network Layer ${d.vlan || 0}`
+      });
+    }
+
+    paths[d.id] = hops;
+  });
+  
+  return paths;
+};
 
 // ─── Shared Helpers ───────────────────────────────────────────────────────────
 
@@ -151,25 +158,31 @@ function EditableDevicePanel({
   onClose: () => void;
   onTrace?: (d: Device) => void;
 }) {
-  const { updateDevice, devices } = useDevices();
+  const { updateDevice, deleteDevice, devices } = useDevices();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Device>(device);
 
-  // Keep draft in sync with external device changes when not editing
   useEffect(() => {
     if (!editing) setDraft(device);
   }, [device, editing]);
 
   const currentDevice = devices.find(d => d.id === device.id) || device;
 
-  const save = () => {
-    updateDevice(draft.id, draft);
+  const save = async () => {
+    await updateDevice(draft.id, draft);
     setEditing(false);
   };
 
   const cancel = () => {
     setDraft(currentDevice);
     setEditing(false);
+  };
+
+  const handleDelete = async () => {
+    if (window.confirm(`Are you sure you want to completely remove ${currentDevice.name}?`)) {
+      await deleteDevice(currentDevice.id);
+      onClose();
+    }
   };
 
   const set = (key: keyof Device, val: string | number) =>
@@ -184,7 +197,7 @@ function EditableDevicePanel({
         <div className="p-2 rounded-lg bg-primary/10 text-primary flex-shrink-0">{deviceIcon(d.type, 15)}</div>
         <div className="flex-1 min-w-0">
           <div className="font-mono font-semibold text-sm text-foreground truncate">{d.name}</div>
-          <div className="text-xs text-muted-foreground capitalize">{d.type.replace("_", " ")}</div>
+          <div className="text-xs text-muted-foreground capitalize">{d.type?.replace("_", " ")}</div>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
           {editing ? (
@@ -197,9 +210,14 @@ function EditableDevicePanel({
               </button>
             </>
           ) : (
-            <button onClick={() => setEditing(true)} className="flex items-center gap-1 px-2.5 py-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded text-xs transition-colors border border-border">
-              <Pencil size={11} /> Edit
-            </button>
+            <>
+              <button onClick={() => setEditing(true)} className="flex items-center gap-1 px-2.5 py-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary/50 rounded text-xs transition-colors border border-border">
+                <Pencil size={11} /> Edit
+              </button>
+              <button onClick={handleDelete} className="p-1.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded transition-colors border border-border" title="Delete Device">
+                <Trash2 size={13} />
+              </button>
+            </>
           )}
           <button onClick={onClose} className="ml-1 text-muted-foreground hover:text-foreground transition-colors"><X size={14} /></button>
         </div>
@@ -222,7 +240,7 @@ function EditableDevicePanel({
                       onChange={e => set("type", e.target.value)}
                       className="w-full bg-secondary border border-border rounded px-2 py-1 text-xs font-mono text-foreground focus:outline-none focus:border-primary/60 appearance-none pr-6"
                     >
-                      {DEVICE_TYPES.map(t => <option key={t} value={t}>{t.replace("_", " ")}</option>)}
+                      {DEVICE_TYPES.map(t => <option key={t} value={t}>{t?.replace("_", " ")}</option>)}
                     </select>
                     <ChevronDown size={10} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
                   </div>
@@ -275,9 +293,131 @@ function EditableDevicePanel({
   );
 }
 
+// ─── Add Device Modal ─────────────────────────────────────────────────────────
+
+function AddDeviceModal({ onClose }: { onClose: () => void }) {
+  const { createDevice } = useDevices();
+  const [formData, setFormData] = useState<Omit<Device, "id">>({
+    name: "", type: "pc", hostname: "", ip: "", mac: "", vlan: 1, owner: "", room: "", floor: 1,
+    status: "online", rack: "", switchPort: "", patchPanel: "", wallJack: ""
+  });
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formData.name) return alert("Device Identity Name is required.");
+    await createDevice(formData);
+    onClose();
+  };
+
+  const setField = (key: keyof Omit<Device, "id">, value: any) => {
+    setFormData(prev => ({ ...prev, [key]: value }));
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="bg-card border border-border rounded-xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div className="flex items-center gap-2">
+            <Plus size={16} className="text-primary" />
+            <h3 className="text-sm font-semibold text-foreground">Register Hardware Asset</h3>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors"><X size={16} /></button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-4 overflow-y-auto space-y-4 flex-1 text-xs">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-muted-foreground block mb-1">Device Identity Name *</label>
+              <input type="text" required value={formData.name} onChange={e => setField("name", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 focus:outline-none focus:border-primary/60" placeholder="e.g. PC-MARKETING-04" />
+            </div>
+            <div>
+              <label className="text-muted-foreground block mb-1">Hardware Cluster Type</label>
+              <select value={formData.type} onChange={e => setField("type", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 focus:outline-none focus:border-primary/60">
+                {DEVICE_TYPES.map(t => <option key={t} value={t}>{t.replace("_", " ")}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-muted-foreground block mb-1">Hostname Reference</label>
+              <input type="text" value={formData.hostname} onChange={e => setField("hostname", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" placeholder="pc-mktg04.local" />
+            </div>
+            <div>
+              <label className="text-muted-foreground block mb-1">IP Node Endpoint</label>
+              <input type="text" value={formData.ip} onChange={e => setField("ip", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" placeholder="10.10.20.45" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="text-muted-foreground block mb-1">MAC Address</label>
+              <input type="text" value={formData.mac} onChange={e => setField("mac", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" placeholder="00:1A:2B:3C:4D:5E" />
+            </div>
+            <div>
+              <label className="text-muted-foreground block mb-1">VLAN Network</label>
+              <input type="number" value={formData.vlan} onChange={e => setField("vlan", Number(e.target.value))} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" />
+            </div>
+            <div>
+              <label className="text-muted-foreground block mb-1">Initial Status</label>
+              <select value={formData.status} onChange={e => setField("status", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 focus:outline-none focus:border-primary/60">
+                <option value="online">Online</option>
+                <option value="warning">Warning</option>
+                <option value="offline">Offline</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="text-muted-foreground block mb-1">Physical Room</label>
+              <input type="text" value={formData.room} onChange={e => setField("room", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 focus:outline-none focus:border-primary/60" placeholder="Room 204" />
+            </div>
+            <div>
+              <label className="text-muted-foreground block mb-1">Floor Lvl</label>
+              <input type="number" value={formData.floor} onChange={e => setField("floor", Number(e.target.value))} className="w-full bg-secondary border border-border rounded px-2 py-1.5 focus:outline-none focus:border-primary/60" />
+            </div>
+            <div>
+              <label className="text-muted-foreground block mb-1">Asset Owner</label>
+              <input type="text" value={formData.owner} onChange={e => setField("owner", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 focus:outline-none focus:border-primary/60" placeholder="IT Dept" />
+            </div>
+          </div>
+
+          <div className="border-t border-border/60 my-2 pt-2">
+            <span className="text-muted-foreground block text-[10px] font-mono mb-2 uppercase tracking-wide">Infrastructure Port Mapping Layouts</span>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-muted-foreground block mb-1">Target Server Rack</label>
+                <input type="text" value={formData.rack} onChange={e => setField("rack", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" placeholder="Rack-A" />
+              </div>
+              <div>
+                <label className="text-muted-foreground block mb-1">Switch Interface Port</label>
+                <input type="text" value={formData.switchPort} onChange={e => setField("switchPort", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" placeholder="Gi1/0/2" />
+              </div>
+              <div>
+                <label className="text-muted-foreground block mb-1">Patch Panel Slot</label>
+                <input type="text" value={formData.patchPanel} onChange={e => setField("patchPanel", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" placeholder="PP-A Port 5" />
+              </div>
+              <div>
+                <label className="text-muted-foreground block mb-1">Terminal Wall Jack</label>
+                <input type="text" value={formData.wallJack} onChange={e => setField("wallJack", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" placeholder="WJ-B02" />
+              </div>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 border-t border-border pt-3 mt-4">
+            <button type="button" onClick={onClose} className="px-3 py-1.5 text-muted-foreground hover:text-foreground rounded transition-colors border border-border">Cancel</button>
+            <button type="submit" className="px-4 py-1.5 bg-primary text-primary-foreground rounded font-medium hover:bg-primary/90 transition-colors">Commit Node</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 // ─── Dashboard View ───────────────────────────────────────────────────────────
 
-function DashboardView({ onNavigate }: { onNavigate: (v: View) => void }) {
+function DashboardView({ onNavigate, onTrace }: { onNavigate: (v: View) => void, onTrace: (d: Device) => void }) {
   const { devices } = useDevices();
   const [selected, setSelected] = useState<Device | null>(null);
 
@@ -292,7 +432,7 @@ function DashboardView({ onNavigate }: { onNavigate: (v: View) => void }) {
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
       <div>
         <h1 className="text-2xl font-semibold text-foreground tracking-tight">Infrastructure Overview</h1>
-        <p className="text-sm text-muted-foreground mt-1 font-mono">Main Office · Floor 1–3 · Last sync 2 min ago</p>
+        <p className="text-sm text-muted-foreground mt-1 font-mono">Main Office · Floors 1–4 · Live Connected Database</p>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -315,50 +455,60 @@ function DashboardView({ onNavigate }: { onNavigate: (v: View) => void }) {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="bg-card border border-border rounded-lg p-4 col-span-1">
           <div className="text-sm font-medium text-foreground mb-4">Device Breakdown</div>
-          <div className="space-y-2.5">
-            {(Object.entries(typeCounts) as [DeviceType, number][]).sort((a, b) => b[1] - a[1]).map(([type, count]) => (
-              <div key={type} className="flex items-center gap-3">
-                <span className="text-muted-foreground">{deviceIcon(type, 14)}</span>
-                <div className="flex-1">
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-foreground capitalize">{type.replace("_", " ")}</span>
-                    <span className="font-mono text-muted-foreground">{count}</span>
-                  </div>
-                  <div className="h-1 bg-muted rounded-full overflow-hidden">
-                    <div className="h-full rounded-full bg-primary" style={{ width: `${(count / devices.length) * 100}%` }} />
+          {devices.length === 0 ? (
+            <div className="text-xs text-muted-foreground italic">No metrics calculated yet.</div>
+          ) : (
+            <div className="space-y-2.5">
+              {(Object.entries(typeCounts) as [DeviceType, number][]).sort((a, b) => b[1] - a[1]).map(([type, count]) => (
+                <div key={type} className="flex items-center gap-3">
+                  <span className="text-muted-foreground">{deviceIcon(type, 14)}</span>
+                  <div className="flex-1">
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-foreground capitalize">{type?.replace("_", " ")}</span>
+                      <span className="font-mono text-muted-foreground">{count}</span>
+                    </div>
+                    <div className="h-1 bg-muted rounded-full overflow-hidden">
+                      <div className="h-full rounded-full bg-primary" style={{ width: `${(count / (devices.length || 1)) * 100}%` }} />
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="bg-card border border-border rounded-lg p-4 col-span-1 lg:col-span-2">
           <div className="flex items-center justify-between mb-4">
-            <div className="text-sm font-medium text-foreground">Devices <span className="text-muted-foreground text-xs font-mono ml-1">click to edit</span></div>
+            <div className="text-sm font-medium text-foreground">Recent Infrastructure Additions</div>
             <button onClick={() => onNavigate("devices")} className="text-xs text-primary hover:underline font-mono">View all →</button>
           </div>
-          <div className="space-y-1">
-            {devices.slice(0, 7).map(dev => (
-              <div
-                key={dev.id}
-                onClick={() => setSelected(selected?.id === dev.id ? null : dev)}
-                className={`flex items-center gap-3 px-2 py-2.5 rounded-md cursor-pointer transition-colors group ${selected?.id === dev.id ? "bg-primary/5 border border-primary/20" : "hover:bg-secondary/50 border border-transparent"}`}
-              >
-                <div className="w-5 text-muted-foreground group-hover:text-primary transition-colors">{deviceIcon(dev.type, 14)}</div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-mono text-foreground truncate">{dev.name}</span>
-                    <span className="text-xs text-muted-foreground hidden sm:block">{dev.owner}</span>
+          {devices.length === 0 ? (
+            <div className="text-xs text-muted-foreground py-8 text-center border border-dashed border-border rounded-lg">
+              No managed records mapped inside local state cluster.
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {devices.slice(0, 7).map(dev => (
+                <div
+                  key={dev.id}
+                  onClick={() => setSelected(selected?.id === dev.id ? null : dev)}
+                  className={`flex items-center gap-3 px-2 py-2.5 rounded-md cursor-pointer transition-colors group ${selected?.id === dev.id ? "bg-primary/5 border border-primary/20" : "hover:bg-secondary/50 border border-transparent"}`}
+                >
+                  <div className="w-5 text-muted-foreground group-hover:text-primary transition-colors">{deviceIcon(dev.type, 14)}</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-mono text-foreground truncate">{dev.name}</span>
+                      <span className="text-xs text-muted-foreground hidden sm:block">{dev.owner}</span>
+                    </div>
+                    <div className="text-xs text-muted-foreground font-mono">{dev.ip} · {dev.room}</div>
                   </div>
-                  <div className="text-xs text-muted-foreground font-mono">{dev.ip} · {dev.room}</div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: statusColor[dev.status] }} />
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: statusColor[dev.status] }} />
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -367,7 +517,7 @@ function DashboardView({ onNavigate }: { onNavigate: (v: View) => void }) {
         <EditableDevicePanel
           device={selected}
           onClose={() => setSelected(null)}
-          onTrace={dev => { onNavigate("tracer"); }}
+          onTrace={onTrace}
         />
       )}
 
@@ -414,14 +564,8 @@ function TracerView({ initialDevice }: { initialDevice?: Device | null }) {
     const paths = buildTracePaths(devices);
     setSelected(dev);
     setResults([]);
-    setQuery(dev.name);
-    const path = paths[dev.id] || [
-      { id: "t1", label: dev.name, sublabel: dev.hostname, type: dev.type, detail: `${dev.ip} · VLAN ${dev.vlan} · ${dev.room}` },
-      { id: "t2", label: dev.wallJack || "Wall Jack", sublabel: `${dev.room}, Floor ${dev.floor}`, type: "wall_jack" as DeviceType, detail: "RJ45 · Cat6" },
-      { id: "t3", label: dev.patchPanel || "Patch Panel", sublabel: "Rack-A", type: "patch_panel" as DeviceType, detail: "Cat6 · 2m" },
-      { id: "t4", label: `Switch-A · ${dev.switchPort || "Gi1/0/1"}`, sublabel: "Rack-A", type: "switch" as DeviceType, detail: `VLAN ${dev.vlan} · 1Gbps` },
-      { id: "t5", label: "Core Switch CS-1", sublabel: "Rack-A · U1", type: "switch" as DeviceType, detail: "Backbone · 40Gbps" },
-    ];
+    setQuery(dev.name || "");
+    const path = paths[dev.id] || [];
     setTracePath(path);
     setAnimStep(0);
     setTracing(true);
@@ -439,8 +583,11 @@ function TracerView({ initialDevice }: { initialDevice?: Device | null }) {
     if (!query.trim()) { setResults([]); return; }
     const q = query.toLowerCase();
     setResults(devices.filter(d =>
-      d.name.toLowerCase().includes(q) || d.ip.includes(q) || d.mac.toLowerCase().includes(q) ||
-      d.hostname.toLowerCase().includes(q) || d.owner.toLowerCase().includes(q) ||
+      (d.name && d.name.toLowerCase().includes(q)) || 
+      (d.ip && d.ip.includes(q)) || 
+      (d.mac && d.mac.toLowerCase().includes(q)) ||
+      (d.hostname && d.hostname.toLowerCase().includes(q)) || 
+      (d.owner && d.owner.toLowerCase().includes(q)) ||
       (d.switchPort && d.switchPort.toLowerCase().includes(q)) ||
       (d.wallJack && d.wallJack.toLowerCase().includes(q))
     ));
@@ -483,7 +630,7 @@ function TracerView({ initialDevice }: { initialDevice?: Device | null }) {
         )}
       </div>
 
-      {selected && tracePath.length === 0 && <div className="text-xs text-muted-foreground font-mono">Building trace…</div>}
+      {selected && tracePath.length === 0 && <div className="text-xs text-muted-foreground font-mono">No network trace paths generated for asset setup.</div>}
 
       {tracePath.length > 0 && (
         <div>
@@ -529,7 +676,7 @@ function TracerView({ initialDevice }: { initialDevice?: Device | null }) {
                         <span className="font-mono text-sm font-medium text-foreground">{node.label}</span>
                         <span className="text-xs font-mono px-2 py-0.5 rounded-full border"
                           style={{ color: nodeColor[node.type], borderColor: `${nodeColor[node.type]}40`, backgroundColor: `${nodeColor[node.type]}10` }}>
-                          {node.type.replace("_", " ")}
+                          {node.type?.replace("_", " ")}
                         </span>
                       </div>
                       <div className="text-xs text-muted-foreground mt-1 font-mono">{node.sublabel}</div>
@@ -550,18 +697,9 @@ function TracerView({ initialDevice }: { initialDevice?: Device | null }) {
         </div>
       )}
 
-      {!selected && tracePath.length === 0 && (
-        <div className="border border-dashed border-border rounded-lg p-10 text-center">
-          <Cable size={40} strokeWidth={1} className="text-muted-foreground/30 mx-auto mb-4" />
-          <p className="text-sm text-muted-foreground">Enter a device name, IP, or MAC address to trace its cable path.</p>
-          <p className="text-xs text-muted-foreground/60 mt-2 font-mono">Try: PC-104 · 10.10.1.104 · Sarah Mitchell · WJ-A12</p>
-        </div>
-      )}
-
-      {/* Edit modal */}
       {editDevice && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setEditDevice(null)}>
-          <div className="w-full max-w-md" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md max-h-[85vh] flex flex-col shadow-2xl">
             <EditableDevicePanel device={editDevice} onClose={() => setEditDevice(null)} />
           </div>
         </div>
@@ -570,105 +708,494 @@ function TracerView({ initialDevice }: { initialDevice?: Device | null }) {
   );
 }
 
-// ─── Devices View ─────────────────────────────────────────────────────────────
+// ─── Devices View Table ───────────────────────────────────────────────────────
 
-function DevicesView({ onTrace }: { onTrace: (dev: Device) => void }) {
+function DevicesView({ onTrace }: { onTrace: (d: Device) => void }) {
   const { devices } = useDevices();
-  const [query, setQuery] = useState("");
-  const [typeFilter, setTypeFilter] = useState<DeviceType | "all">("all");
+  const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Device | null>(null);
+  const [isAddOpen, setIsAddOpen] = useState(false);
 
-  const filtered = devices.filter(d => {
-    const q = query.toLowerCase();
-    const matchQ = !q || d.name.toLowerCase().includes(q) || d.ip.includes(q) || d.mac.toLowerCase().includes(q) || d.hostname.toLowerCase().includes(q) || d.owner.toLowerCase().includes(q);
-    const matchT = typeFilter === "all" || d.type === typeFilter;
-    return matchQ && matchT;
-  });
-
-  const types: DeviceType[] = ["pc", "printer", "ap", "ip_phone", "camera", "switch", "server"];
-
-  // Keep selected in sync with updated device data
-  const selectedDevice = selected ? devices.find(d => d.id === selected.id) || null : null;
+  const filtered = devices.filter(d => 
+    (d.name && d.name.toLowerCase().includes(search.toLowerCase())) ||
+    (d.ip && d.ip.includes(search)) ||
+    (d.hostname && d.hostname.toLowerCase().includes(search.toLowerCase())) ||
+    (d.owner && d.owner.toLowerCase().includes(search.toLowerCase()))
+  );
 
   return (
-    <div className="p-6 space-y-4 max-w-7xl mx-auto">
-      <div className="flex items-center justify-between">
+    <div className="p-6 max-w-7xl mx-auto space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Devices</h1>
-          <p className="text-sm text-muted-foreground mt-0.5 font-mono">{filtered.length} of {devices.length} devices</p>
+          <h1 className="text-2xl font-semibold tracking-tight">Infrastructure Inventory</h1>
+          <p className="text-sm text-muted-foreground mt-1">Managed endpoints, network topology distribution blocks, and node terminals.</p>
         </div>
-      </div>
-
-      <div className="flex flex-col sm:flex-row gap-3">
-        <div className="relative flex-1">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Filter by name, IP, MAC, owner…"
-            className="w-full pl-9 pr-4 py-2.5 bg-card border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30 font-mono" />
-        </div>
-        <div className="flex gap-2 flex-wrap">
-          <button onClick={() => setTypeFilter("all")}
-            className={`px-3 py-2 rounded-lg text-xs font-mono border transition-colors ${typeFilter === "all" ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border text-muted-foreground hover:border-primary/40"}`}>
-            All
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <div className="relative w-full sm:w-64">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Filter hardware inventory..."
+              className="w-full pl-9 pr-4 py-2 bg-card border border-border rounded-lg text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/60" />
+          </div>
+          <button onClick={() => setIsAddOpen(true)} className="flex items-center gap-1 bg-primary text-primary-foreground text-xs font-medium px-3 py-2 rounded-lg hover:bg-primary/90 transition-colors shrink-0">
+            <Plus size={14} /> Add Asset
           </button>
-          {types.map(t => (
-            <button key={t} onClick={() => setTypeFilter(t)}
-              className={`px-3 py-2 rounded-lg text-xs font-mono border flex items-center gap-1.5 transition-colors ${typeFilter === t ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border text-muted-foreground hover:border-primary/40"}`}>
-              {deviceIcon(t, 12)}<span className="capitalize">{t.replace("_", " ")}</span>
-            </button>
-          ))}
         </div>
       </div>
 
-      <div className="flex gap-4 min-h-0">
-        <div className="flex-1 min-w-0 bg-card border border-border rounded-lg overflow-hidden">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
+        <div className="bg-card border border-border rounded-lg overflow-hidden col-span-1 xl:col-span-2 shadow-sm">
           <div className="overflow-x-auto">
-            <table className="w-full text-xs">
+            <table className="w-full border-collapse text-left text-xs">
               <thead>
-                <tr className="border-b border-border">
-                  {["Device", "IP Address", "Owner", "Room", "Status", ""].map(col => (
-                    <th key={col} className="text-left px-4 py-3 text-muted-foreground font-medium uppercase tracking-wider text-[10px] whitespace-nowrap">{col}</th>
-                  ))}
+                <tr className="border-b border-border bg-secondary/20 text-muted-foreground font-medium select-none">
+                  <th className="p-3">Device Identity</th>
+                  <th className="p-3">IP Node / Host</th>
+                  <th className="p-3 hidden sm:table-cell">VLAN</th>
+                  <th className="p-3 hidden md:table-cell">Physical Node Room</th>
+                  <th className="p-3 text-right">Status</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-border/60">
                 {filtered.map(dev => (
-                  <tr key={dev.id} onClick={() => setSelected(selectedDevice?.id === dev.id ? null : dev)}
-                    className={`border-b border-border/50 cursor-pointer transition-colors hover:bg-secondary/40 ${selectedDevice?.id === dev.id ? "bg-primary/5 border-l-2 border-l-primary" : ""}`}>
-                    <td className="px-4 py-3">
+                  <tr key={dev.id} onClick={() => setSelected(selected?.id === dev.id ? null : dev)}
+                    className={`hover:bg-secondary/20 cursor-pointer transition-colors ${selected?.id === dev.id ? "bg-primary/5" : ""}`}>
+                    <td className="p-3 font-medium">
                       <div className="flex items-center gap-2.5">
-                        <span className="text-muted-foreground">{deviceIcon(dev.type, 13)}</span>
+                        <span className="text-muted-foreground">{deviceIcon(dev.type, 14)}</span>
                         <div>
-                          <div className="font-mono font-medium text-foreground">{dev.name}</div>
-                          <div className="text-muted-foreground text-[10px] font-mono truncate max-w-[140px]">{dev.hostname}</div>
+                          <div className="font-mono text-foreground">{dev.name}</div>
+                          <div className="text-[10px] text-muted-foreground capitalize mt-0.5">{dev.type?.replace("_", " ")}</div>
                         </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3 font-mono text-foreground">{dev.ip}</td>
-                    <td className="px-4 py-3 text-muted-foreground">{dev.owner}</td>
-                    <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{dev.room}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: statusColor[dev.status] }} />
-                        <span style={{ color: statusColor[dev.status] }}>{statusLabel[dev.status]}</span>
-                      </div>
+                    <td className="p-3 font-mono">
+                      <div className="text-foreground">{dev.ip}</div>
+                      <div className="text-[10px] text-muted-foreground mt-0.5 truncate max-w-[160px]">{dev.hostname}</div>
                     </td>
-                    <td className="px-4 py-3">
-                      <button onClick={e => { e.stopPropagation(); onTrace(dev); }}
-                        className="text-primary hover:text-primary/80 font-mono flex items-center gap-1 whitespace-nowrap transition-colors">
-                        <Cable size={11} /> Trace
-                      </button>
+                    <td className="p-3 font-mono text-muted-foreground hidden sm:table-cell">{dev.vlan}</td>
+                    <td className="p-3 text-muted-foreground hidden md:table-cell">{dev.room}</td>
+                    <td className="p-3 text-right">
+                      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px]"
+                        style={{ color: statusColor[dev.status], borderColor: `${statusColor[dev.status]}30`, backgroundColor: `${statusColor[dev.status]}08` }}>
+                        <span className="w-1 h-1 rounded-full" style={{ backgroundColor: statusColor[dev.status] }} />
+                        {statusLabel[dev.status]}
+                      </span>
                     </td>
                   </tr>
                 ))}
+                {filtered.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="p-8 text-center text-muted-foreground/60 italic font-mono">
+                      Inventory register sequence is completely blank.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
-            {filtered.length === 0 && <div className="py-12 text-center text-muted-foreground text-sm">No devices match your filters.</div>}
           </div>
         </div>
 
-        {selectedDevice && (
-          <div className="w-72 flex-shrink-0">
-            <EditableDevicePanel device={selectedDevice} onClose={() => setSelected(null)} onTrace={onTrace} />
+        <div className="col-span-1 xl:sticky xl:top-6">
+          {selected ? (
+            <EditableDevicePanel device={selected} onClose={() => setSelected(null)} onTrace={onTrace} />
+          ) : (
+            <div className="border border-dashed border-border rounded-lg p-8 text-center text-muted-foreground/60 text-xs">
+              <Info size={20} strokeWidth={1.5} className="mx-auto mb-2 text-muted-foreground/30" />
+              Select a hardware asset row from the grid inventory view to inspect network parameters, physical mapping layouts, or rewrite records.
+            </div>
+          )}
+        </div>
+      </div>
+
+      {isAddOpen && <AddDeviceModal onClose={() => setIsAddOpen(false)} />}
+    </div>
+  );
+}
+
+// ─── Rack View Dashboard ──────────────────────────────────────────────────────
+
+function RackView() {
+  const { devices } = useDevices();
+  
+  // Dynamically derive rack-mounted configurations straight from the live DB state array
+  const rackDevices = devices
+    .filter(d => d.rack && d.rack.trim() !== "")
+    .map((d, i) => ({
+      name: d.name,
+      type: d.type,
+      units: 1, 
+      position: i + 1,
+      color: d.type === "server" ? "#10b981" : d.type === "switch" ? "#22d3ee" : "#a78bfa",
+      ip: d.ip || "—"
+    }));
+
+  return (
+    <div className="p-6 max-w-4xl mx-auto space-y-6">
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">Server Rack Cabinet Elevation</h1>
+        <p className="text-sm text-muted-foreground mt-1 font-mono">Location: Data Center Enclosures · Active Dynamic Assets</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-8 items-start">
+        <div className="md:col-span-2 bg-[#090d16] border border-border/80 rounded-xl p-6 shadow-2xl flex justify-center">
+          <div className="w-full max-w-md border-x-4 border-slate-700 bg-slate-950/40 p-2 space-y-1 relative min-h-[200px] flex flex-col justify-center">
+            
+            {rackDevices.length === 0 ? (
+              <div className="text-xs font-mono text-muted-foreground/40 text-center py-12">
+                No database components registered with matching active Rack attributes.
+              </div>
+            ) : (
+              rackDevices.map((device, index) => (
+                <div key={index} className="border rounded px-3 py-2 flex items-center justify-between shadow-inner transition-all hover:brightness-110"
+                  style={{ 
+                    backgroundColor: `${device.color}12`, 
+                    borderColor: `${device.color}40`, 
+                    minHeight: `36px`
+                  }}>
+                  <div className="flex items-center gap-2.5">
+                    <span style={{ color: device.color }}>{deviceIcon(device.type, 13)}</span>
+                    <div>
+                      <div className="text-xs font-mono font-medium text-slate-200">{device.name}</div>
+                      <div className="text-[10px] text-muted-foreground font-mono mt-0.5">{device.ip}</div>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border"
+                      style={{ color: device.color, borderColor: `${device.color}20`, backgroundColor: `${device.color}05` }}>
+                      {device.units}U · Pos {device.position}
+                    </span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div className="bg-card border border-border rounded-lg p-4">
+            <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground mb-3">Enclosure Telemetry Summary</div>
+            <div className="space-y-2 font-mono text-xs">
+              <div className="flex justify-between border-b border-border/40 pb-1.5">
+                <span className="text-muted-foreground">Rack Occupancy Capacity</span>
+                <span className="text-foreground">{rackDevices.length} Units Staged</span>
+              </div>
+              <div className="flex justify-between pb-0.5">
+                <span className="text-muted-foreground">Rack Allocation Status</span>
+                <span className="text-slate-400">{rackDevices.length > 0 ? "Active" : "Vacant"}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Interactive Floor Map View ───────────────────────────────────────────────
+
+function FloorMapView({ onTrace }: { onTrace: (d: Device) => void }) {
+  const { devices } = useDevices();
+  const [selected, setSelected] = useState<Device | null>(null);
+  const [currentFloor, setCurrentFloor] = useState<number>(1);
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+
+  // Relying fully on user custom node layout positioning configurations, default fallback coordinates cleared
+  const [mapDots, setMapDots] = useState<Record<number, Record<string, { top: string; left: string }>>>(() => {
+    const saved = localStorage.getItem("netmap_dots_v2");
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { console.error(e); }
+    }
+    return {};
+  });
+
+  const [floorplans, setFloorplans] = useState<Record<number, string>>(() => {
+    const saved = localStorage.getItem("netmap_floorplans_v2");
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { console.error(e); }
+    }
+    return {};
+  });
+
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [selectedDeviceToAdd, setSelectedDeviceToAdd] = useState("");
+
+  useEffect(() => {
+    localStorage.setItem("netmap_dots_v2", JSON.stringify(mapDots));
+  }, [mapDots]);
+
+  useEffect(() => {
+    localStorage.setItem("netmap_floorplans_v2", JSON.stringify(floorplans));
+  }, [floorplans]);
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!draggingId || !mapContainerRef.current) return;
+
+    const rect = mapContainerRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const leftPct = Math.min(Math.max((x / rect.width) * 100, 0), 100).toFixed(2) + "%";
+    const topPct = Math.min(Math.max((y / rect.height) * 100, 0), 100).toFixed(2) + "%";
+
+    setMapDots(prev => ({
+      ...prev,
+      [currentFloor]: {
+        ...(prev[currentFloor] || {}),
+        [draggingId]: { top: topPct, left: leftPct }
+      }
+    }));
+  };
+
+  const handleMouseUp = () => {
+    if (draggingId) setDraggingId(null);
+  };
+
+  const handleAddDeviceToMap = () => {
+    if (!selectedDeviceToAdd) return;
+    setMapDots(prev => ({
+      ...prev,
+      [currentFloor]: {
+        ...(prev[currentFloor] || {}),
+        [selectedDeviceToAdd]: { top: "50%", left: "50%" }
+      }
+    }));
+    const dev = devices.find(d => d.id === selectedDeviceToAdd);
+    if (dev) setSelected(dev);
+    setSelectedDeviceToAdd("");
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      if (dataUrl) {
+        setFloorplans(prev => ({ ...prev, [currentFloor]: dataUrl }));
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleResetLayout = () => {
+    if (window.confirm("Are you sure you want to clear all custom placements and uploaded blueprints?")) {
+      localStorage.removeItem("netmap_dots_v2");
+      localStorage.removeItem("netmap_floorplans_v2");
+      setMapDots({});
+      setFloorplans({});
+      setSelected(null);
+    }
+  };
+
+  return (
+    <div className="p-6 max-w-6xl mx-auto space-y-6 select-none">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Blueprint Asset Topology Mapping</h1>
+          <p className="text-sm text-muted-foreground mt-1">Spatial orientation topology controls. Drag any active node marker to dynamically adjust coordinates.</p>
+        </div>
+        
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleResetLayout}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono rounded-md border border-border hover:bg-destructive/10 hover:text-destructive hover:border-destructive/30 transition-all text-muted-foreground"
+          >
+            <RotateCcw size={12} /> Reset Layout
+          </button>
+
+          <div className="flex bg-secondary border border-border p-1 rounded-lg select-none">
+            {[1, 2, 3, 4].map(floor => (
+              <button
+                key={floor}
+                onClick={() => {
+                  setCurrentFloor(floor);
+                  setSelected(null);
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono rounded-md transition-all ${
+                  currentFloor === floor
+                    ? "bg-primary text-primary-foreground font-semibold shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Layers size={12} /> Floor {floor}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-card border border-border p-4 rounded-xl">
+        <div className="space-y-2">
+          <label className="text-xs font-mono text-muted-foreground block font-medium flex items-center gap-1">
+            <Plus size={12} /> Add Network Asset / Node to Current Layout Floor
+          </label>
+          <div className="flex gap-2">
+            <select
+              value={selectedDeviceToAdd}
+              onChange={e => setSelectedDeviceToAdd(e.target.value)}
+              className="flex-1 bg-secondary border border-border rounded px-2.5 py-1.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary/60"
+            >
+              <option value="">-- Choose hardware terminal --</option>
+              {devices.map(d => (
+                <option key={d.id} value={d.id}>
+                  {d.name} [{d.type?.replace("_", " ")}]
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={handleAddDeviceToMap}
+              className="px-3 py-1.5 bg-primary text-primary-foreground rounded text-xs font-medium hover:bg-primary/90 flex items-center gap-1"
+            >
+              Place Node
+            </button>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-xs font-mono text-muted-foreground block font-medium flex items-center gap-1">
+            <Upload size={12} /> Upload & Replace Layout Floor Plan Blueprint Diagram File
+          </label>
+          <div className="flex items-center justify-center w-full">
+            <label className="flex flex-col items-center justify-center w-full h-9 border border-border border-dashed rounded-lg cursor-pointer bg-secondary/40 hover:bg-secondary/80 transition-colors">
+              <div className="flex items-center justify-center gap-2 px-3 text-xs text-muted-foreground">
+                <Upload size={13} />
+                <span>Choose floor layout image asset file...</span>
+              </div>
+              <input type="file" accept="image/*" onChange={handleFileUpload} className="hidden" />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
+        <div 
+          ref={mapContainerRef}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+          className="lg:col-span-3 bg-[#0a0f1d] border border-border/80 rounded-xl aspect-[16/10] relative overflow-hidden shadow-2xl group flex items-center justify-center cursor-crosshair"
+          style={{
+            backgroundImage: floorplans[currentFloor] ? `url(${floorplans[currentFloor]})` : "none",
+            backgroundSize: "cover",
+            backgroundPosition: "center"
+          }}
+        >
+          {!floorplans[currentFloor] && (
+            <div className="absolute inset-0 opacity-[0.03] bg-[linear-gradient(to_right,#808080_1px,transparent_1px),linear-gradient(to_bottom,#808080_1px,transparent_1px)] bg-[size:24px_24px] pointer-events-none" />
+          )}
+          
+          <div className="w-[85%] h-[75%] border-2 border-slate-800/60 rounded-lg relative bg-slate-950/20">
+            <div className="absolute top-0 bottom-0 left-[35%] w-px bg-slate-800/40 border-dashed pointer-events-none" />
+            <div className="absolute top-0 bottom-0 left-[65%] w-px bg-slate-800/40 border-dashed pointer-events-none" />
+            <div className="absolute left-0 right-0 top-[50%] h-px bg-slate-800/40 border-dashed pointer-events-none" />
+
+            <div className="absolute top-2 left-3 text-[10px] font-mono text-muted-foreground/30 uppercase tracking-widest pointer-events-none">Office Suite Zone alpha · Floor {currentFloor}</div>
+
+            {devices.map(dev => {
+              const coords = mapDots[currentFloor]?.[dev.id];
+              if (!coords) return null;
+
+              const isSel = selected?.id === dev.id;
+              return (
+                <div
+                  key={dev.id}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    setDraggingId(dev.id);
+                    setSelected(dev);
+                  }}
+                  className={`absolute w-8 h-8 -ml-4 -mt-4 rounded-full flex items-center justify-center cursor-move transition-shadow z-10`}
+                  style={{ 
+                    top: coords.top, 
+                    left: coords.left, 
+                    backgroundColor: isSel ? `${statusColor[dev.status]}30` : `${statusColor[dev.status]}15`,
+                    boxShadow: isSel ? `0 0 0 4px ${statusColor[dev.status]}40` : draggingId === dev.id ? "0 0 12px #22d3ee" : "none"
+                  }}
+                >
+                  <span className="text-foreground" style={{ color: statusColor[dev.status] }}>
+                    {deviceIcon(dev.type, 13)}
+                  </span>
+                  
+                  <span className="absolute top-full mt-1 bg-slate-900 border border-slate-700 text-[9px] font-mono text-slate-200 px-1.5 py-0.5 rounded shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-20">
+                    {dev.name} · {dev.ip}
+                  </span>
+                </div>
+              );
+            })}
+
+            {Object.keys(mapDots[currentFloor] || {}).length === 0 && (
+              <div className="absolute inset-0 flex items-center justify-center text-xs font-mono text-muted-foreground/40 pointer-events-none">
+                No active device map node representations placed. Select a component above to register coordinates.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="col-span-1">
+          {selected ? (
+            <EditableDevicePanel device={selected} onClose={() => setSelected(null)} onTrace={onTrace} />
+          ) : (
+            <div className="border border-dashed border-border rounded-lg p-6 text-center text-muted-foreground/50 text-xs">
+              Click any runtime endpoint node marker highlighted on the interactive office asset layout grid schematic to inspect localized interface traces or fine tune placement.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Sidebar Navigation Component ─────────────────────────────────────────────
+
+function Sidebar({
+  view,
+  onNavigate,
+  collapsed,
+  onToggle,
+}: {
+  view: View;
+  onNavigate: (v: View) => void;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  const links: { target: View; label: string; icon: JSX.Element }[] = [
+    { target: "dashboard", label: "Dashboard Grid", icon: <LayoutDashboard size={15} /> },
+    { target: "devices", label: "Asset Directory", icon: <Box size={15} /> },
+    { target: "tracer", label: "Cable Layer Trace", icon: <Cable size={15} /> },
+    { target: "rack", label: "Rack Cabinet Elevation", icon: <Server size={15} /> },
+    { target: "floormap", label: "Spatial Floor Map", icon: <Map size={15} /> },
+  ];
+
+  return (
+    <div className={`h-full border-r border-border bg-card flex flex-col transition-all duration-300 ${collapsed ? "w-16" : "w-60"}`}>
+      <div className="p-4 border-b border-border flex items-center justify-between gap-3 overflow-hidden select-none flex-shrink-0">
+        <div className="flex items-center gap-2.5 text-primary min-w-0">
+          <Network size={18} className="flex-shrink-0" />
+          {!collapsed && <span className="font-semibold text-sm tracking-tight text-foreground truncate font-mono">NETMAP INFRA</span>}
+        </div>
+        <button onClick={onToggle} className="text-muted-foreground hover:text-foreground p-1 rounded hover:bg-secondary/60 transition-colors"><Menu size={14} /></button>
+      </div>
+
+      <nav className="flex-1 p-2 space-y-1 overflow-y-auto">
+        {links.map(link => {
+          const active = view === link.target;
+          return (
+            <button key={link.target} onClick={() => onNavigate(link.target)}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 text-xs rounded-lg transition-all font-medium whitespace-nowrap ${active ? "bg-primary text-primary-foreground shadow-md" : "text-muted-foreground hover:text-foreground hover:bg-secondary/40"}`}>
+              <span className={active ? "text-primary-foreground" : "text-muted-foreground"}>{link.icon}</span>
+              {!collapsed && <span>{link.label}</span>}
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="p-4 border-t border-border flex items-center gap-3 overflow-hidden flex-shrink-0 select-none">
+        <div className="w-7 h-7 rounded-full bg-secondary border border-border flex items-center justify-center flex-shrink-0 text-foreground font-mono text-[10px] font-bold">R</div>
+        {!collapsed && (
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-foreground truncate">Operator Terminal</div>
+            <div className="text-[10px] font-mono text-muted-foreground truncate">admin@netmap.local</div>
           </div>
         )}
       </div>
@@ -676,301 +1203,114 @@ function DevicesView({ onTrace }: { onTrace: (dev: Device) => void }) {
   );
 }
 
-// ─── Rack View ────────────────────────────────────────────────────────────────
+// ─── Main App Shell Component ──────────────────────────────────────────────────
 
-function RackView() {
-  const { devices, updateDevice } = useDevices();
-  const [hoveredSlot, setHoveredSlot] = useState<number | null>(null);
-  const [editDevice, setEditDevice] = useState<Device | null>(null);
-  const totalU = 16;
-  const U_HEIGHT = 36;
-
-  const getDeviceAtU = (u: number) => RACK_DEVICES.find(d => d.position <= u && u < d.position + d.units);
-  const isTopU = (u: number) => { const dev = getDeviceAtU(u); return dev ? dev.position === u : false; };
-  const hovered = hoveredSlot !== null ? getDeviceAtU(hoveredSlot) : null;
-
-  // Rack devices that correspond to actual Device records
-  const rackDeviceRecords = devices.filter(d => d.rack === "Rack-A");
-
-  return (
-    <div className="p-6 max-w-5xl mx-auto space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Rack View</h1>
-        <p className="text-sm text-muted-foreground mt-1 font-mono">Rack-A · Server Room · Floor 1 · {totalU}U</p>
-      </div>
-
-      <div className="flex flex-col lg:flex-row gap-6">
-        <div className="flex-shrink-0">
-          <div className="bg-card border border-border rounded-xl overflow-hidden" style={{ width: 320 }}>
-            <div className="bg-secondary/60 px-4 py-3 flex items-center justify-between border-b border-border">
-              <span className="font-mono text-sm font-medium">RACK-A</span>
-              <span className="text-xs text-muted-foreground font-mono">{totalU}U · 42" · 600mm</span>
-            </div>
-            <div className="p-3 space-y-px">
-              {Array.from({ length: totalU }, (_, i) => i + 1).map(u => {
-                const dev = getDeviceAtU(u);
-                const top = isTopU(u);
-                const isEmpty = !dev;
-                return (
-                  <div key={u} onMouseEnter={() => dev && setHoveredSlot(u)} onMouseLeave={() => setHoveredSlot(null)}
-                    className="flex items-center gap-2" style={{ height: U_HEIGHT }}>
-                    <div className="text-[10px] font-mono text-muted-foreground w-6 text-right flex-shrink-0">
-                      {top || isEmpty ? `U${u}` : ""}
-                    </div>
-                    <div className="flex-1 rounded flex items-center overflow-hidden transition-all cursor-pointer"
-                      style={{ height: U_HEIGHT - 2, backgroundColor: isEmpty ? "#0d1320" : `${dev.color}18`, borderWidth: 1, borderStyle: "solid",
-                        borderColor: isEmpty ? "rgba(255,255,255,0.04)" : hoveredSlot !== null && getDeviceAtU(hoveredSlot)?.name === dev?.name ? `${dev.color}90` : `${dev.color}35` }}>
-                      {top && dev && (
-                        <div className="flex items-center gap-2 px-3 w-full">
-                          <span style={{ color: dev.color }}>{deviceIcon(dev.type, 13)}</span>
-                          <div className="flex-1 min-w-0">
-                            <div className="font-mono font-medium text-foreground truncate" style={{ fontSize: 11 }}>{dev.name}</div>
-                            {dev.units > 1 && <div className="font-mono text-[10px] text-muted-foreground">{dev.units}U</div>}
-                          </div>
-                          <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: statusColor[dev.status] }} />
-                        </div>
-                      )}
-                      {!top && dev && <div className="w-full h-full" style={{ borderLeft: `2px solid ${dev.color}30` }} />}
-                      {isEmpty && <div className="px-3 text-[10px] font-mono text-muted-foreground/30">empty</div>}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex-1 space-y-4">
-          <div className={`bg-card border rounded-lg p-4 transition-all ${hovered ? "border-primary/40" : "border-border"}`}>
-            {hovered ? (
-              <div className="space-y-3">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg" style={{ backgroundColor: `${hovered.color}18`, color: hovered.color }}>{deviceIcon(hovered.type, 18)}</div>
-                  <div>
-                    <div className="font-mono font-semibold text-foreground">{hovered.name}</div>
-                    <div className="text-xs text-muted-foreground">U{hovered.position} – U{hovered.position + hovered.units - 1} · {hovered.units}U</div>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  {[["IP", hovered.ip], ["Units", `${hovered.units}U`], ["Position", `U${hovered.position}`], ["Status", statusLabel[hovered.status]]].map(([k, v]) => (
-                    <div key={k} className="bg-secondary/50 rounded px-3 py-2">
-                      <div className="text-muted-foreground text-[10px] uppercase tracking-wide mb-0.5">{k}</div>
-                      <div className="font-mono text-foreground">{v}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="text-sm text-muted-foreground text-center py-4">
-                <Info size={20} className="mx-auto mb-2 opacity-40" />
-                Hover over a rack slot to see device details
-              </div>
-            )}
-          </div>
-
-          {/* Editable rack device records */}
-          {rackDeviceRecords.length > 0 && (
-            <div className="bg-card border border-border rounded-lg overflow-hidden">
-              <div className="px-4 py-3 border-b border-border text-xs font-medium text-muted-foreground uppercase tracking-wider flex justify-between items-center">
-                <span>Rack Device Records</span>
-                <span className="font-mono normal-case text-muted-foreground/60">click to edit</span>
-              </div>
-              {rackDeviceRecords.map(dev => (
-                <div key={dev.id} onClick={() => setEditDevice(dev)}
-                  className="flex items-center gap-3 px-4 py-3 hover:bg-secondary/30 transition-colors cursor-pointer border-b border-border/50 last:border-0">
-                  <span className="text-primary">{deviceIcon(dev.type, 14)}</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="font-mono text-xs text-foreground">{dev.name}</div>
-                    <div className="text-[10px] text-muted-foreground font-mono">{dev.ip} · Rack {dev.rack}</div>
-                  </div>
-                  <Pencil size={11} className="text-muted-foreground" />
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="bg-card border border-border rounded-lg overflow-hidden">
-            <div className="px-4 py-3 border-b border-border text-xs font-medium text-muted-foreground uppercase tracking-wider">Installed Equipment</div>
-            {RACK_DEVICES.map(dev => (
-              <div key={dev.name} className="flex items-center gap-3 px-4 py-3 hover:bg-secondary/30 transition-colors border-b border-border/50 last:border-0">
-                <span style={{ color: dev.color }}>{deviceIcon(dev.type, 14)}</span>
-                <div className="flex-1 min-w-0">
-                  <div className="font-mono text-xs text-foreground">{dev.name}</div>
-                  <div className="text-[10px] text-muted-foreground font-mono">U{dev.position} · {dev.units}U · {dev.ip}</div>
-                </div>
-                <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: statusColor[dev.status] }} />
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {editDevice && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setEditDevice(null)}>
-          <div className="w-full max-w-md" onClick={e => e.stopPropagation()}>
-            <EditableDevicePanel device={editDevice} onClose={() => setEditDevice(null)} />
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Floor Map View ───────────────────────────────────────────────────────────
-
-function FloorMapView({ onTrace }: { onTrace: (dev: Device) => void }) {
-  const { devices } = useDevices();
-  const [hoveredDevice, setHoveredDevice] = useState<string | null>(null);
-  const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
-
-  const floorDevices = devices.filter(d => d.floor === 2);
-  const positions: Record<string, { x: number; y: number }> = {
-    "d1": { x: 180, y: 140 }, "d2": { x: 280, y: 140 }, "d3": { x: 380, y: 140 },
-    "d4": { x: 520, y: 200 }, "d5": { x: 100, y: 80 }, "d6": { x: 540, y: 80 },
-    "d7": { x: 320, y: 260 }, "d8": { x: 180, y: 180 }, "d11": { x: 380, y: 200 },
-  };
-
-  const selectedLive = selectedDevice ? devices.find(d => d.id === selectedDevice.id) || null : null;
-
-  return (
-    <div className="p-6 max-w-6xl mx-auto space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Floor Map</h1>
-          <p className="text-sm text-muted-foreground mt-1 font-mono">Main Office · Floor 2 · {floorDevices.length} devices</p>
-        </div>
-        <div className="flex items-center gap-3 text-xs font-mono text-muted-foreground">
-          {([["#22d3ee", "Workstations"], ["#10b981", "Infrastructure"], ["#a78bfa", "Wireless"], ["#f59e0b", "Peripherals"]] as [string, string][]).map(([c, l]) => (
-            <div key={l} className="flex items-center gap-1.5">
-              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: c }} />{l}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="flex gap-4">
-        <div className="flex-1 bg-card border border-border rounded-xl overflow-hidden">
-          <svg width="100%" viewBox="0 0 650 360" className="block">
-            <defs>
-              <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                <path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
-              </pattern>
-            </defs>
-            <rect width={650} height={360} fill="url(#grid)" />
-            {[
-              { x: 40, y: 40, w: 200, h: 200, label: "Open Space NW" },
-              { x: 260, y: 40, w: 200, h: 200, label: "Office Wing" },
-              { x: 480, y: 40, w: 140, h: 140, label: "Meeting Room" },
-              { x: 40, y: 260, w: 580, h: 80, label: "Corridor" },
-            ].map(room => (
-              <g key={room.label}>
-                <rect x={room.x} y={room.y} width={room.w} height={room.h} rx={6} fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.07)" strokeWidth={1} />
-                <text x={room.x + 8} y={room.y + 18} fontSize={9} fill="rgba(255,255,255,0.2)" fontFamily="JetBrains Mono, monospace">{room.label}</text>
-              </g>
-            ))}
-            <rect x={490} y={200} width={120} height={50} rx={4} fill="rgba(34,211,238,0.1)" stroke="rgba(34,211,238,0.4)" strokeWidth={1.5} />
-            <text x={550} y={220} textAnchor="middle" fontSize={9} fill="#22d3ee" fontFamily="JetBrains Mono, monospace">RACK-A</text>
-            <text x={550} y={234} textAnchor="middle" fontSize={8} fill="rgba(34,211,238,0.6)" fontFamily="JetBrains Mono, monospace">Server Room</text>
-            {[{ x: 160, y: 240 }, { x: 260, y: 240 }, { x: 360, y: 240 }, { x: 460, y: 240 }].map((pos, i) => (
-              <g key={i}>
-                <rect x={pos.x - 5} y={pos.y - 5} width={10} height={10} rx={2} fill="rgba(16,185,129,0.15)" stroke="rgba(16,185,129,0.5)" strokeWidth={1} />
-                <text x={pos.x} y={pos.y + 17} textAnchor="middle" fontSize={7} fill="rgba(16,185,129,0.6)" fontFamily="JetBrains Mono, monospace">WJ-A{i + 10}</text>
-              </g>
-            ))}
-            {floorDevices.filter(d => positions[d.id]).map(dev => {
-              const pos = positions[dev.id];
-              const isHovered = hoveredDevice === dev.id;
-              const isSelected = selectedLive?.id === dev.id;
-              const color = dev.type === "ap" ? "#a78bfa" : dev.type === "printer" || dev.type === "ip_phone" ? "#f59e0b" : "#22d3ee";
-              return (
-                <g key={dev.id} transform={`translate(${pos.x}, ${pos.y})`} className="cursor-pointer"
-                  onMouseEnter={() => setHoveredDevice(dev.id)} onMouseLeave={() => setHoveredDevice(null)}
-                  onClick={() => setSelectedDevice(selectedLive?.id === dev.id ? null : dev)}>
-                  {(isHovered || isSelected) && <circle r={18} fill="none" stroke={color} strokeWidth={1} opacity={0.3} />}
-                  <circle r={12} fill={isSelected || isHovered ? `${color}30` : `${color}15`}
-                    stroke={isSelected ? color : isHovered ? `${color}80` : `${color}40`} strokeWidth={isSelected ? 2 : 1.5} />
-                  <circle cx={9} cy={-9} r={3} fill={statusColor[dev.status]} stroke="#0a0e1a" strokeWidth={1} />
-                  <text y={26} textAnchor="middle" fontSize={8} fill={isHovered || isSelected ? color : "rgba(221,228,240,0.6)"}
-                    fontFamily="JetBrains Mono, monospace" fontWeight={isSelected ? "600" : "400"}>{dev.name}</text>
-                </g>
-              );
-            })}
-          </svg>
-        </div>
-
-        <div className="w-64 flex-shrink-0">
-          {selectedLive ? (
-            <EditableDevicePanel device={selectedLive} onClose={() => setSelectedDevice(null)} onTrace={onTrace} />
-          ) : (
-            <div className="bg-card border border-border rounded-lg p-4 text-center space-y-3">
-              <Map size={28} className="mx-auto text-muted-foreground/30" strokeWidth={1} />
-              <p className="text-xs text-muted-foreground">Click any device on the floor map to view and edit its details.</p>
-              <div className="space-y-1 text-left">
-                {floorDevices.slice(0, 5).map(d => (
-                  <button key={d.id} onClick={() => setSelectedDevice(d)}
-                    className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-secondary/50 transition-colors text-xs">
-                    <span className="text-muted-foreground">{deviceIcon(d.type, 11)}</span>
-                    <span className="font-mono text-muted-foreground">{d.name}</span>
-                    <div className="ml-auto w-1.5 h-1.5 rounded-full" style={{ backgroundColor: statusColor[d.status] }} />
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Sidebar ──────────────────────────────────────────────────────────────────
-
-function Sidebar({ view, onNavigate, collapsed, onToggle }: { view: View; onNavigate: (v: View) => void; collapsed: boolean; onToggle: () => void }) {
-  const links: { id: View; label: string; icon: React.ReactNode }[] = [
-    { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={16} strokeWidth={1.5} /> },
-    { id: "tracer", label: "Cable Tracer", icon: <Cable size={16} strokeWidth={1.5} /> },
-    { id: "devices", label: "Devices", icon: <Monitor size={16} strokeWidth={1.5} /> },
-    { id: "rack", label: "Rack View", icon: <Server size={16} strokeWidth={1.5} /> },
-    { id: "floormap", label: "Floor Map", icon: <Map size={16} strokeWidth={1.5} /> },
-  ];
-  return (
-    <div className="flex flex-col border-r border-border bg-sidebar transition-all duration-200 flex-shrink-0" style={{ width: collapsed ? 56 : 220 }}>
-      <div className={`flex items-center gap-3 px-4 py-5 border-b border-border ${collapsed ? "justify-center px-3" : ""}`}>
-        <div className="w-7 h-7 rounded-lg bg-primary/15 border border-primary/30 flex items-center justify-center flex-shrink-0">
-          <Network size={14} className="text-primary" strokeWidth={2} />
-        </div>
-        {!collapsed && <div><div className="text-sm font-semibold text-foreground leading-none">NetMap</div><div className="text-[10px] text-muted-foreground font-mono mt-0.5">Cable Manager</div></div>}
-      </div>
-      <nav className="flex-1 p-2 space-y-0.5">
-        {links.map(link => (
-          <button key={link.id} onClick={() => onNavigate(link.id)} title={collapsed ? link.label : undefined}
-            className={`w-full flex items-center gap-3 rounded-lg transition-all text-sm ${collapsed ? "justify-center px-0 py-2.5" : "px-3 py-2.5"} ${view === link.id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground hover:bg-secondary/50"}`}>
-            <span className="flex-shrink-0">{link.icon}</span>
-            {!collapsed && <span>{link.label}</span>}
-            {!collapsed && view === link.id && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
-          </button>
-        ))}
-      </nav>
-      <div className="p-2 border-t border-border">
-        <button onClick={onToggle} className={`w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors ${collapsed ? "justify-center px-0" : ""}`}>
-          <Menu size={16} strokeWidth={1.5} />
-          {!collapsed && <span className="text-sm">Collapse</span>}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ─── App Root ─────────────────────────────────────────────────────────────────
+const API_BASE_URL = "http://localhost:8000";
 
 export default function App() {
-  const [devices, setDevices] = useState<Device[]>(INITIAL_DEVICES);
+  const [devices, setDevices] = useState<Device[]>([]);
   const [view, setView] = useState<View>("dashboard");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [traceTarget, setTraceTarget] = useState<Device | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const updateDevice = (id: string, patch: Partial<Device>) =>
-    setDevices(prev => prev.map(d => d.id === id ? { ...d, ...patch } : d));
+  const fetchDevices = async () => {
+    try {
+      setLoading(true);
+      const response = await axios.get(`${API_BASE_URL}/devices/`);
+      
+      const mappedDevices = response.data.map((d: any) => ({
+        id: String(d.id),
+        name: d.name,
+        type: d.device_type,
+        hostname: d.hostname,
+        ip: d.ip_address,
+        mac: d.mac_address,
+        vlan: d.vlan,
+        owner: d.owner,
+        room: d.room_id ? `Room ${d.room_id}` : d.room || "—",
+        floor: d.floor || 1,
+        rack: d.rack_id ? `Rack ${d.rack_id}` : d.rack || undefined,
+        status: d.status,
+        switchPort: d.switch_port || d.switchPort || undefined,
+        patchPanel: d.patch_panel || d.patchPanel || undefined,
+        wallJack: d.wall_jack || d.wallJack || undefined,
+      }));
+      
+      setDevices(mappedDevices);
+    } catch (error) {
+      console.error("Error fetching operational devices array sequence:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchDevices();
+  }, []);
+
+  const updateDevice = async (id: string, patch: Partial<Device>) => {
+    try {
+      const payload = {
+        name: patch.name,
+        device_type: patch.type,
+        hostname: patch.hostname,
+        ip_address: patch.ip,
+        mac_address: patch.mac,
+        vlan: patch.vlan,
+        owner: patch.owner,
+        status: patch.status,
+        room: patch.room,
+        floor: patch.floor,
+        rack: patch.rack,
+        switch_port: patch.switchPort,
+        patch_panel: patch.patchPanel,
+        wall_jack: patch.wallJack,
+      };
+
+      Object.keys(payload).forEach(key => (payload as any)[key] === undefined && delete (payload as any)[key]);
+
+      await axios.patch(`${API_BASE_URL}/devices/${id}`, payload);
+      await fetchDevices();
+    } catch (error) {
+      console.error("Failed to commit network parameter edits back to persistent storage:", error);
+    }
+  };
+
+  const deleteDevice = async (id: string) => {
+    try {
+      await axios.delete(`${API_BASE_URL}/devices/${id}`);
+      await fetchDevices();
+    } catch (error) {
+      console.error("Failed to delete network asset:", error);
+    }
+  };
+
+  const createDevice = async (newDevice: Omit<Device, "id">) => {
+    try {
+      const payload = {
+        name: newDevice.name,
+        device_type: newDevice.type,
+        hostname: newDevice.hostname,
+        ip_address: newDevice.ip,
+        mac_address: newDevice.mac,
+        vlan: newDevice.vlan,
+        owner: newDevice.owner,
+        status: newDevice.status,
+        room: newDevice.room,
+        floor: newDevice.floor,
+        rack: newDevice.rack,
+        switch_port: newDevice.switchPort,
+        patch_panel: newDevice.patchPanel,
+        wall_jack: newDevice.wallJack,
+      };
+
+      await axios.post(`${API_BASE_URL}/devices/`, payload);
+      await fetchDevices();
+    } catch (error) {
+      console.error("Failed to add new network asset:", error);
+    }
+  };
 
   const navigateToTrace = (dev: Device) => {
     setTraceTarget(dev);
@@ -979,12 +1319,20 @@ export default function App() {
 
   useEffect(() => { if (view !== "tracer") setTraceTarget(null); }, [view]);
 
+  if (loading) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-background text-muted-foreground font-mono text-xs tracking-wider">
+        Querying centralized NetMap topology records dataset execution instance...
+      </div>
+    );
+  }
+
   return (
-    <DeviceContext.Provider value={{ devices, updateDevice }}>
+    <DeviceContext.Provider value={{ devices, updateDevice, deleteDevice, createDevice }}>
       <div className="flex h-screen bg-background overflow-hidden" style={{ fontFamily: "'Inter', sans-serif" }}>
         <Sidebar view={view} onNavigate={setView} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(c => !c)} />
         <main className="flex-1 overflow-y-auto min-w-0">
-          {view === "dashboard" && <DashboardView onNavigate={setView} />}
+          {view === "dashboard" && <DashboardView onNavigate={setView} onTrace={navigateToTrace} />}
           {view === "tracer" && <TracerView key={traceTarget?.id ?? "open"} initialDevice={traceTarget} />}
           {view === "devices" && <DevicesView onTrace={navigateToTrace} />}
           {view === "rack" && <RackView />}
