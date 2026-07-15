@@ -1,3 +1,4 @@
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +8,18 @@ from models import Device
 from schemas import DeviceCreate, DeviceOut, DeviceUpdate
 
 router = APIRouter(prefix="/devices", tags=["devices"])
+
+
+# Central helper to extract digits out of strings ("server room 4" -> 4)
+def parse_to_id_or_none(val: Any) -> Any:
+    if val in ("", None, "—"):
+        return None
+    if isinstance(val, str):
+        digits = "".join([c for c in val if c.isdigit()])
+        if digits:
+            return int(digits)
+        return None  # Return None if it's a non-numeric string to protect integer DB columns
+    return val
 
 
 @router.get("/", response_model=list[DeviceOut])
@@ -27,8 +40,9 @@ async def list_devices(
             Device.hostname.ilike(like),
             Device.ip_address.ilike(like),
             Device.mac_address.ilike(like),
-            Device.owner.ilike(like),
+            Device.owner.ilike(like)
         ))
+
     if device_type:
         stmt = stmt.where(Device.device_type == device_type)
     if status:
@@ -42,28 +56,13 @@ async def list_devices(
     return result.scalars().all()
 
 
-@router.post("/", response_model=DeviceOut, status_code=201)
+@router.post("/", response_model=DeviceOut)
 async def create_device(body: DeviceCreate, db: AsyncSession = Depends(get_db)):
-    data = body.model_dump()
-    
-    # Map the sanitized UI payload keys safely to the Database SQLAlchemy properties
-    device_data = {
-        "name": data.get("name"),
-        "device_type": data.get("device_type"),
-        "status": data.get("status"),
-        "hostname": data.get("hostname"),
-        "ip_address": data.get("ip_address"),
-        "mac_address": data.get("mac_address"),
-        "vlan": data.get("vlan"),
-        "owner": data.get("owner"),
-        "notes": data.get("notes"),
-        # Foreign keys mapping
-        "room_id": data.get("room"), 
-        "rack_id": data.get("rack"),
-        # Layout mappings
-        "rack_position": data.get("floor"), 
-        "rack_units": data.get("rack_units", 1),
-    }
+    device_data = body.model_dump()
+    if isinstance(device_data.get("room_id"), str):
+        device_data["room_id"] = parse_to_id_or_none(device_data["room_id"])
+    if isinstance(device_data.get("rack_id"), str):
+        device_data["rack_id"] = parse_to_id_or_none(device_data["rack_id"])
 
     device = Device(**device_data)
     db.add(device)
@@ -86,19 +85,24 @@ async def update_device(device_id: int, body: DeviceUpdate, db: AsyncSession = D
     if not device:
         raise HTTPException(404, "Device not found")
     
-    # Extract only the explicitly provided fields from the update request
     update_data = body.model_dump(exclude_unset=True)
     
-    # Direct explicit mapping translations for updates
+    # Explicit mapping schema decouples values cleanly 
     mappings = {
         "room": "room_id",
+        "room_id": "room_id",
         "rack": "rack_id",
-        "floor": "rack_position"
+        "rack_id": "rack_id",
+        "floor": "floor",
+        "rack_position": "rack_position"
     }
     
     for field, value in update_data.items():
-        # Translate the field name if it has a direct mapping rule
         db_field = mappings.get(field, field)
+        
+        if db_field in ("room_id", "rack_id"):
+            value = parse_to_id_or_none(value)
+                    
         if hasattr(device, db_field):
             setattr(device, db_field, value)
             

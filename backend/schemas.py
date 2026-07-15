@@ -1,6 +1,6 @@
 """Pydantic v2 schemas for request/response validation."""
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union, Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
 import re
@@ -54,11 +54,30 @@ class DeviceBase(BaseModel):
     vlan: Optional[int] = None
     owner: Optional[str] = None
     status: StatusEnum = StatusEnum.unknown
-    room_id: Optional[int] = None
-    rack_id: Optional[int] = None
+    
+    # Allow both alternative UI field structures and mixed string values ("server room 4")
+    room_id: Optional[Union[str, int]] = None
+    rack_id: Optional[Union[str, int]] = None
+    room: Optional[Union[str, int]] = None
+    rack: Optional[Union[str, int]] = None
+    floor: Optional[Union[str, int]] = None
+    
     rack_position: Optional[int] = None
     rack_units: int = 1
     notes: Optional[str] = None
+
+    # Pre-validator to dynamically clean up text into integers before checking types
+    @field_validator("room_id", "rack_id", "room", "rack", "floor", mode="before")
+    @classmethod
+    def clean_mixed_id_strings(cls, v: Any) -> Any:
+        if v in ("", None, "—"):
+            return None
+        if isinstance(v, str):
+            digits = "".join([c for c in v if c.isdigit()])
+            if digits:
+                return int(digits)
+            return None  # Fallback to None if there are no numbers in the string
+        return v
 
     @field_validator("ip_address")
     @classmethod
@@ -96,11 +115,29 @@ class DeviceUpdate(BaseModel):
     vlan: Optional[int] = None
     owner: Optional[str] = None
     status: Optional[StatusEnum] = None
-    room_id: Optional[int] = None
-    rack_id: Optional[int] = None
+    
+    # Allow both types and alternative fields for patch payloads
+    room_id: Optional[Union[str, int]] = None
+    rack_id: Optional[Union[str, int]] = None
+    room: Optional[Union[str, int]] = None
+    rack: Optional[Union[str, int]] = None
+    floor: Optional[Union[str, int]] = None
+    
     rack_position: Optional[int] = None
     rack_units: Optional[int] = None
     notes: Optional[str] = None
+
+    @field_validator("room_id", "rack_id", "room", "rack", "floor", mode="before")
+    @classmethod
+    def clean_mixed_id_strings(cls, v: Any) -> Any:
+        if v in ("", None, "—"):
+            return None
+        if isinstance(v, str):
+            digits = "".join([c for c in v if c.isdigit()])
+            if digits:
+                return int(digits)
+            return None
+        return v
 
 
 class DeviceOut(OrmBase):
