@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite"
+    "dev": "concurrently \"pnpm start:backend\" \"pnpm start:frontend\"",
+    "start:backend": ".venv\\Scripts\\activate && cd backend && uvicorn main:app --reload",
+    "start:frontend": "vite"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",
@@ -70,6 +72,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "4.7.0",
+    "concurrently": "^10.0.3",
     "tailwindcss": "4.1.12",
     "vite": "6.3.5"
   },
@@ -89,5 +92,16 @@
     "overrides": {
       "vite": "6.3.5"
     }
-  }
+  },
+  "description": "",
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yash260750/network-tool.git"
+  },
+  "keywords": [],
+  "bugs": {
+    "url": "https://github.com/Yash260750/network-tool/issues"
+  },
+  "homepage": "https://github.com/Yash260750/network-tool#readme"
 }

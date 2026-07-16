@@ -76,7 +76,6 @@ class Room(Base):
     room_number: Mapped[str | None] = mapped_column(String(20))
 
     floor: Mapped["Floor"] = relationship(back_populates="rooms")
-    devices: Mapped[list["Device"]] = relationship(back_populates="room")
 
 
 class Rack(Base):
@@ -88,7 +87,6 @@ class Rack(Base):
     total_units: Mapped[int] = mapped_column(Integer, default=42)
 
     room: Mapped["Room"] = relationship()
-    devices: Mapped[list["Device"]] = relationship(back_populates="rack")
 
 
 # ── Devices ───────────────────────────────────────────────────────────────────
@@ -107,8 +105,16 @@ class Device(Base):
     owner: Mapped[str | None] = mapped_column(String(120))
     status: Mapped[StatusEnum] = mapped_column(Enum(StatusEnum), default=StatusEnum.unknown)
 
-    room_id: Mapped[int | None] = mapped_column(ForeignKey("rooms.id", ondelete="SET NULL"))
-    rack_id: Mapped[int | None] = mapped_column(ForeignKey("racks.id", ondelete="SET NULL"))
+    # Plain, denormalized location fields — NOT foreign keys into
+    # Room/Rack. Nothing in this app creates real Room/Rack rows (no CRUD
+    # routes or UI for them), and the frontend's rack view assigns free-text
+    # cabinet names like "East Cabinet", not real Rack IDs. Treating these
+    # as FKs silently nulled them out on every save (any non-numeric string
+    # failed the FK lookup and got dropped). If real Building/Floor/Room/Rack
+    # management is built out later, migrate these to real FKs then.
+    room: Mapped[str | None] = mapped_column(String(120))
+    rack: Mapped[str | None] = mapped_column(String(80))
+    floor: Mapped[int | None] = mapped_column(Integer)
     rack_position: Mapped[int | None] = mapped_column(Integer)  # U from bottom
     rack_units: Mapped[int] = mapped_column(Integer, default=1)
 
@@ -116,8 +122,6 @@ class Device(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    room: Mapped["Room | None"] = relationship(back_populates="devices")
-    rack: Mapped["Rack | None"] = relationship(back_populates="devices")
     ports: Mapped[list["Port"]] = relationship(back_populates="device", cascade="all, delete-orphan")
 
 
@@ -139,17 +143,17 @@ class Port(Base):
     notes: Mapped[str | None] = mapped_column(Text)
 
     device: Mapped["Device"] = relationship(back_populates="ports")
-    
+
     # Added cascade="all, delete-orphan" to both relationships
     connections_a: Mapped[list["Connection"]] = relationship(
-        "Connection", 
-        foreign_keys="Connection.port_a_id", 
+        "Connection",
+        foreign_keys="Connection.port_a_id",
         back_populates="port_a",
         cascade="all, delete-orphan"
     )
     connections_b: Mapped[list["Connection"]] = relationship(
-        "Connection", 
-        foreign_keys="Connection.port_b_id", 
+        "Connection",
+        foreign_keys="Connection.port_b_id",
         back_populates="port_b",
         cascade="all, delete-orphan"
     )

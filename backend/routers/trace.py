@@ -1,125 +1,98 @@
-"""
-Cable trace router.
-
-Algorithm: iterative BFS/DFS through the port-connection graph.
-Start from a port, follow Connection edges, collect each hop until
-there are no more unvisited connections. Cycle-safe via visited set.
-
-Example path:
-  PC NIC port → wall jack port → patch panel port → switch port → uplink port → core switch port
-"""
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from database import get_db
-from models import Connection, Device, Port
+from models import Port
 from schemas import TraceHop, TraceResult
 
 router = APIRouter(prefix="/trace", tags=["trace"])
 
-
-async def _load_port_with_device(port_id: int, db: AsyncSession) -> tuple[Port, Device] | None:
-    result = await db.execute(
-        select(Port, Device).join(Device, Port.device_id == Device.id).where(Port.id == port_id)
-    )
-    row = result.first()
-    return row if row else None
+# Safety valve against pathological/looping data — a real cable run is never
+# going to be anywhere close to this long.
+MAX_HOPS = 50
 
 
-async def _connections_for_port(port_id: int, db: AsyncSession) -> list[Connection]:
-    result = await db.execute(
-        select(Connection).where(
-            or_(Connection.port_a_id == port_id, Connection.port_b_id == port_id)
+async def _load_port(db: AsyncSession, port_id: int) -> Port:
+    stmt = (
+        select(Port)
+        .where(Port.id == port_id)
+        .options(
+            selectinload(Port.device),
+            selectinload(Port.connections_a),
+            selectinload(Port.connections_b),
         )
     )
-    return list(result.scalars().all())
+    port = (await db.execute(stmt)).scalar_one_or_none()
+    if not port:
+        raise HTTPException(404, f"Port {port_id} not found")
+    return port
 
 
-@router.get("/port/{port_id}", response_model=TraceResult)
-async def trace_from_port(port_id: int, db: AsyncSession = Depends(get_db)):
+@router.get("/{port_id}", response_model=TraceResult)
+async def trace_cable(port_id: int, db: AsyncSession = Depends(get_db)):
     """
-    Trace the full cable path starting from a given port ID.
-    Returns ordered list of hops from start to end of the cable run.
-    """
-    row = await _load_port_with_device(port_id, db)
-    if not row:
-        raise HTTPException(404, "Port not found")
+    Walks the Port/Connection graph starting at `port_id`, following one
+    Connection edge per hop, per the traversal described in models.py:
+    "Cable trace = graph traversal starting from any Port, following
+    Connection edges."
 
-    port, device = row
+    A port is assumed to have at most one live cable at a time in normal
+    physical use, but the graph itself doesn't enforce that, so this treats
+    it generally: at each port, follow any connection not already traversed,
+    and stop on a dead end or a would-be cycle back to a port already
+    visited.
+    """
+    current_port = await _load_port(db, port_id)
+
     hops: list[TraceHop] = []
-    visited_connections: set[int] = set()
-    visited_ports: set[int] = set()
+    visited_port_ids: set[int] = set()
+    visited_connection_ids: set[int] = set()
+    incoming_connection_id: int | None = None
 
-    current_port = port
-    current_device = device
-    hop_num = 0
-    last_connection_id: int | None = None
+    while current_port is not None and len(hops) < MAX_HOPS:
+        if current_port.id in visited_port_ids:
+            break  # cycle guard
 
-    while True:
-        visited_ports.add(current_port.id)
+        visited_port_ids.add(current_port.id)
         hops.append(TraceHop(
-            hop=hop_num,
+            hop=len(hops) + 1,
             port_id=current_port.id,
             port_number=current_port.port_number,
-            device_id=current_device.id,
-            device_name=current_device.name,
-            device_type=current_device.device_type,
-            connection_id=last_connection_id,
+            device_id=current_port.device_id,
+            device_name=current_port.device.name,
+            device_type=current_port.device.device_type,
+            connection_id=incoming_connection_id,
         ))
 
-        # Find the next unvisited connection from this port
-        connections = await _connections_for_port(current_port.id, db)
         next_connection = next(
-            (c for c in connections if c.id not in visited_connections),
+            (c for c in current_port.all_connections if c.id not in visited_connection_ids),
             None,
         )
-        if not next_connection:
-            break
+        if next_connection is None:
+            break  # dead end — nothing plugged in beyond here
 
-        visited_connections.add(next_connection.id)
+        # Use the plain FK columns rather than Connection.other_port(), which
+        # touches the port_a/port_b *relationships*. Those weren't eager
+        # loaded here, so accessing them triggers an async lazy-load outside
+        # of an awaited context (SQLAlchemy's MissingGreenlet error). The ID
+        # columns are already present on the loaded Connection row, so this
+        # needs no extra query.
         next_port_id = (
             next_connection.port_b_id
             if next_connection.port_a_id == current_port.id
             else next_connection.port_a_id
         )
+        if next_port_id in visited_port_ids:
+            break  # would revisit a port — stop rather than loop
 
-        if next_port_id in visited_ports:
-            # Cycle detected — stop here
-            break
+        visited_connection_ids.add(next_connection.id)
+        incoming_connection_id = next_connection.id
+        current_port = await _load_port(db, next_port_id)
 
-        row = await _load_port_with_device(next_port_id, db)
-        if not row:
-            break
-
-        current_port, current_device = row
-        last_connection_id = next_connection.id
-        hop_num += 1
-
-        if hop_num > 50:
-            # Hard safety limit — real cable paths never exceed this
-            break
-
-    return TraceResult(start_port_id=port_id, hops=hops, total_hops=len(hops))
-
-
-@router.get("/device/{device_id}", response_model=list[TraceResult])
-async def trace_from_device(device_id: int, db: AsyncSession = Depends(get_db)):
-    """
-    Trace from every port on a device. Useful when you know the device
-    but not the specific port (e.g., search by hostname).
-    Returns one TraceResult per port that has connections.
-    """
-    result = await db.execute(select(Port).where(Port.device_id == device_id))
-    ports = result.scalars().all()
-    if not ports:
-        raise HTTPException(404, "Device not found or has no ports")
-
-    traces = []
-    for port in ports:
-        connections = await _connections_for_port(port.id, db)
-        if connections:
-            trace = await trace_from_port(port.id, db)
-            traces.append(trace)
-
-    return traces
+    return TraceResult(
+        start_port_id=port_id,
+        hops=hops,
+        total_hops=len(hops),
+    )

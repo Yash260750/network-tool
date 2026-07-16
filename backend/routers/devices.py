@@ -1,4 +1,3 @@
-from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,25 +9,14 @@ from schemas import DeviceCreate, DeviceOut, DeviceUpdate
 router = APIRouter(prefix="/devices", tags=["devices"])
 
 
-# Central helper to extract digits out of strings ("server room 4" -> 4)
-def parse_to_id_or_none(val: Any) -> Any:
-    if val in ("", None, "—"):
-        return None
-    if isinstance(val, str):
-        digits = "".join([c for c in val if c.isdigit()])
-        if digits:
-            return int(digits)
-        return None  # Return None if it's a non-numeric string to protect integer DB columns
-    return val
-
-
 @router.get("/", response_model=list[DeviceOut])
 async def list_devices(
     q: str | None = Query(None, description="Search by name, IP, MAC, hostname, owner"),
     device_type: str | None = None,
     status: str | None = None,
-    room_id: int | None = None,
-    rack_id: int | None = None,
+    room: str | None = None,
+    rack: str | None = None,
+    floor: int | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Device)
@@ -47,10 +35,12 @@ async def list_devices(
         stmt = stmt.where(Device.device_type == device_type)
     if status:
         stmt = stmt.where(Device.status == status)
-    if room_id:
-        stmt = stmt.where(Device.room_id == room_id)
-    if rack_id:
-        stmt = stmt.where(Device.rack_id == rack_id)
+    if room:
+        stmt = stmt.where(Device.room == room)
+    if rack:
+        stmt = stmt.where(Device.rack == rack)
+    if floor is not None:
+        stmt = stmt.where(Device.floor == floor)
 
     result = await db.execute(stmt)
     return result.scalars().all()
@@ -58,13 +48,25 @@ async def list_devices(
 
 @router.post("/", response_model=DeviceOut)
 async def create_device(body: DeviceCreate, db: AsyncSession = Depends(get_db)):
-    device_data = body.model_dump()
-    if isinstance(device_data.get("room_id"), str):
-        device_data["room_id"] = parse_to_id_or_none(device_data["room_id"])
-    if isinstance(device_data.get("rack_id"), str):
-        device_data["rack_id"] = parse_to_id_or_none(device_data["rack_id"])
-
-    device = Device(**device_data)
+    # room/rack/floor are plain columns now (see models.py), so every field
+    # on DeviceCreate maps 1:1 to a real Device column — no special-casing
+    # needed here beyond listing them explicitly.
+    device = Device(
+        name=body.name,
+        device_type=body.device_type,
+        hostname=body.hostname,
+        ip_address=body.ip_address,
+        mac_address=body.mac_address,
+        vlan=body.vlan,
+        owner=body.owner,
+        status=body.status,
+        room=body.room,
+        rack=body.rack,
+        floor=body.floor,
+        rack_position=body.rack_position,
+        rack_units=body.rack_units,
+        notes=body.notes,
+    )
     db.add(device)
     await db.commit()
     await db.refresh(device)
@@ -84,28 +86,12 @@ async def update_device(device_id: int, body: DeviceUpdate, db: AsyncSession = D
     device = await db.get(Device, device_id)
     if not device:
         raise HTTPException(404, "Device not found")
-    
+
+    # Every field name in DeviceUpdate maps 1:1 to a real column on Device.
     update_data = body.model_dump(exclude_unset=True)
-    
-    # Explicit mapping schema decouples values cleanly 
-    mappings = {
-        "room": "room_id",
-        "room_id": "room_id",
-        "rack": "rack_id",
-        "rack_id": "rack_id",
-        "floor": "floor",
-        "rack_position": "rack_position"
-    }
-    
     for field, value in update_data.items():
-        db_field = mappings.get(field, field)
-        
-        if db_field in ("room_id", "rack_id"):
-            value = parse_to_id_or_none(value)
-                    
-        if hasattr(device, db_field):
-            setattr(device, db_field, value)
-            
+        setattr(device, field, value)
+
     await db.commit()
     await db.refresh(device)
     return device

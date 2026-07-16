@@ -27,79 +27,68 @@ interface Device {
   rack?: string;
   rack_position?: number;
   status: Status;
-  switchPort?: string;
-  patchPanel?: string;
-  wallJack?: string;
 }
 
-interface TraceNode {
+// A connectable interface on a device — switch port, patch panel port, wall
+// jack, NIC, etc. Two ports linked by a Connection is one physical cable.
+interface Port {
   id: string;
-  label: string;
-  sublabel: string;
-  type: DeviceType;
-  detail: string;
+  deviceId: string;
+  portNumber: string;
+  portType: string;
+  notes: string;
+}
+
+// A physical cable between two ports (graph edge).
+interface Connection {
+  id: string;
+  portAId: string;
+  portBId: string;
+  cableType: string;
+  cableLabel: string;
+  notes: string;
+}
+
+// One stop in a cable trace, as returned by GET /trace/{port_id}.
+interface TraceHop {
+  hop: number;
+  portId: string;
+  portNumber: string;
+  deviceId: string;
+  deviceName: string;
+  deviceType: DeviceType;
+  connectionId: string | null; // null for the starting port
 }
 
 // ─── Device Context ───────────────────────────────────────────────────────────
 
 const DeviceContext = createContext<{
   devices: Device[];
+  ports: Port[];
+  connections: Connection[];
   updateDevice: (id: string, patch: Partial<Device>) => Promise<void>;
   deleteDevice: (id: string) => Promise<void>;
   createDevice: (device: Omit<Device, "id">) => Promise<void>;
-}>({ devices: [], updateDevice: async () => {}, deleteDevice: async () => {}, createDevice: async () => {} });
+  createPort: (deviceId: string, portNumber: string, portType: string, notes: string) => Promise<Port | null>;
+  deletePort: (portId: string) => Promise<void>;
+  createConnection: (portAId: string, portBId: string, cableType: string, cableLabel: string) => Promise<Connection | null>;
+  deleteConnection: (connectionId: string) => Promise<void>;
+  traceFromPort: (portId: string) => Promise<TraceHop[]>;
+}>({
+  devices: [],
+  ports: [],
+  connections: [],
+  updateDevice: async () => {},
+  deleteDevice: async () => {},
+  createDevice: async () => {},
+  createPort: async () => null,
+  deletePort: async () => {},
+  createConnection: async () => null,
+  deleteConnection: async () => {},
+  traceFromPort: async () => [],
+});
 
 const useDevices = () => useContext(DeviceContext);
-
-const buildTracePaths = (devices: Device[]): Record<string, TraceNode[]> => {
-  const paths: Record<string, TraceNode[]> = {};
-
-  devices.forEach(d => {
-    const hops: TraceNode[] = [];
-
-    hops.push({
-      id: `${d.id}-endpoint`,
-      label: d.name || "Unknown Asset",
-      sublabel: d.hostname || "No Hostname",
-      type: d.type,
-      detail: `${d.ip || "No IP"} · VLAN ${d.vlan || 0} · Room: ${d.room || "—"}`
-    });
-
-    if (d.wallJack && d.wallJack.trim() !== "") {
-      hops.push({
-        id: `${d.id}-wj`,
-        label: d.wallJack,
-        sublabel: `Room ${d.room || "—"}, Floor ${d.floor || 1}`,
-        type: "wall_jack",
-        detail: "RJ45 · Cat6 Connection"
-      });
-    }
-
-    if (d.patchPanel && d.patchPanel.trim() !== "") {
-      hops.push({
-        id: `${d.id}-pp`,
-        label: d.patchPanel,
-        sublabel: d.rack ? `Cabinet ${d.rack}` : "Infrastructure Location",
-        type: "patch_panel",
-        detail: "Patch Bay Interface Link"
-      });
-    }
-
-    if (d.switchPort && d.switchPort.trim() !== "") {
-      hops.push({
-        id: `${d.id}-sw`,
-        label: `Switch Port: ${d.switchPort}`,
-        sublabel: d.rack ? `Cabinet ${d.rack}` : "Network Enclosure Cabinet",
-        type: "switch",
-        detail: `VLAN Network Layer ${d.vlan || 0}`
-      });
-    }
-
-    paths[d.id] = hops;
-  });
-  
-  return paths;
-};
 
 // ─── Shared Helpers ───────────────────────────────────────────────────────────
 
@@ -125,6 +114,132 @@ const statusColor: Record<Status, string> = { online: "#10b981", offline: "#5a6a
 const statusLabel: Record<Status, string> = { online: "Online", offline: "Offline", warning: "Warning" };
 const DEVICE_TYPES: DeviceType[] = ["pc", "printer", "ap", "ip_phone", "camera", "switch", "patch_panel", "wall_jack", "server", "firewall", "ups"];
 
+// ─── Ports & Connections Panel ────────────────────────────────────────────────
+// Manages the real Port/Connection graph for a single device: add/remove
+// ports, and link/unlink a port to a port on any other device.
+
+function DevicePortsPanel({ device }: { device: Device }) {
+  const { devices, ports, connections, createPort, deletePort, createConnection, deleteConnection } = useDevices();
+  const [newPortNumber, setNewPortNumber] = useState("");
+  const [newPortType, setNewPortType] = useState("rj45");
+  const [connectTargetByPort, setConnectTargetByPort] = useState<Record<string, string>>({});
+
+  const devicePorts = ports.filter(p => p.deviceId === device.id);
+  const otherPorts = ports.filter(p => p.deviceId !== device.id);
+
+  const labelForPort = (portId: string) => {
+    const port = ports.find(p => p.id === portId);
+    if (!port) return "Unknown port";
+    const dev = devices.find(d => d.id === port.deviceId);
+    return `${dev?.name ?? "Unknown device"} — ${port.portNumber}`;
+  };
+
+  const handleAddPort = async () => {
+    if (!newPortNumber.trim()) return;
+    await createPort(device.id, newPortNumber.trim(), newPortType, "");
+    setNewPortNumber("");
+  };
+
+  const handleConnect = async (portId: string) => {
+    const targetId = connectTargetByPort[portId];
+    if (!targetId) return;
+    await createConnection(portId, targetId, "cat6", "");
+    setConnectTargetByPort(prev => ({ ...prev, [portId]: "" }));
+  };
+
+  return (
+    <div className="border-t border-border px-3 py-3 space-y-3">
+      <div className="text-xs font-medium text-foreground flex items-center gap-1.5">
+        <Cable size={12} className="text-primary" /> Ports &amp; Connections
+      </div>
+
+      {devicePorts.length === 0 ? (
+        <div className="text-[11px] text-muted-foreground italic font-mono">No ports on this device yet.</div>
+      ) : (
+        <div className="space-y-2">
+          {devicePorts.map(port => {
+            const connection = connections.find(c => c.portAId === port.id || c.portBId === port.id);
+            const otherId = connection ? (connection.portAId === port.id ? connection.portBId : connection.portAId) : null;
+
+            return (
+              <div key={port.id} className="bg-secondary/30 border border-border rounded-md p-2 text-xs space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono font-medium text-foreground">
+                    {port.portNumber}{port.portType ? ` · ${port.portType}` : ""}
+                  </span>
+                  <button
+                    onClick={() => { if (window.confirm(`Delete port ${port.portNumber}?`)) deletePort(port.id); }}
+                    className="text-muted-foreground hover:text-destructive transition-colors"
+                    title="Delete port"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                </div>
+
+                {connection && otherId ? (
+                  <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-muted-foreground">
+                    <span>↔ {labelForPort(otherId)}</span>
+                    <button onClick={() => deleteConnection(connection.id)} className="text-muted-foreground hover:text-destructive transition-colors">
+                      Disconnect
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={connectTargetByPort[port.id] || ""}
+                      onChange={e => setConnectTargetByPort(prev => ({ ...prev, [port.id]: e.target.value }))}
+                      className="flex-1 bg-secondary border border-border rounded px-1.5 py-1 text-[11px] font-mono focus:outline-none focus:border-primary/60"
+                    >
+                      <option value="">Connect to…</option>
+                      {otherPorts.map(p => (
+                        <option key={p.id} value={p.id}>{labelForPort(p.id)}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={() => handleConnect(port.id)}
+                      disabled={!connectTargetByPort[port.id]}
+                      className="px-2 py-1 bg-primary text-primary-foreground rounded text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Link
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="flex items-center gap-1.5 pt-1">
+        <input
+          type="text"
+          value={newPortNumber}
+          onChange={e => setNewPortNumber(e.target.value)}
+          placeholder="Port number (e.g. Gi1/0/2)"
+          className="flex-1 bg-secondary border border-border rounded px-2 py-1 text-[11px] font-mono focus:outline-none focus:border-primary/60"
+        />
+        <select
+          value={newPortType}
+          onChange={e => setNewPortType(e.target.value)}
+          className="bg-secondary border border-border rounded px-1.5 py-1 text-[11px] font-mono focus:outline-none focus:border-primary/60"
+        >
+          <option value="rj45">rj45</option>
+          <option value="sfp">sfp</option>
+          <option value="sfp+">sfp+</option>
+          <option value="other">other</option>
+        </select>
+        <button
+          onClick={handleAddPort}
+          disabled={!newPortNumber.trim()}
+          className="px-2 py-1 bg-primary text-primary-foreground rounded text-[11px] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+        >
+          <Plus size={11} /> Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Editable Device Panel ────────────────────────────────────────────────────
 
 const EDITABLE_FIELDS: { key: keyof Device; label: string; mono?: boolean; type?: "text" | "number" | "select" }[] = [
@@ -140,9 +255,6 @@ const EDITABLE_FIELDS: { key: keyof Device; label: string; mono?: boolean; type?
   { key: "rack", label: "Rack ID", mono: true },
   { key: "rack_position", label: "Rack Unit (U)", type: "number", mono: true },
   { key: "status", label: "Status", type: "select" },
-  { key: "switchPort", label: "Switch Port", mono: true },
-  { key: "patchPanel", label: "Patch Panel", mono: true },
-  { key: "wallJack", label: "Wall Jack", mono: true },
 ];
 
 function EditableDevicePanel({
@@ -221,7 +333,7 @@ function EditableDevicePanel({
       <div className="overflow-y-auto flex-1 p-3 space-y-1">
         {EDITABLE_FIELDS.map(({ key, label, mono, type }) => {
           const val = d[key];
-          if (val === undefined && key !== "rack" && key !== "rack_position" && key !== "switchPort" && key !== "patchPanel" && key !== "wallJack") return null;
+          if (val === undefined && key !== "rack" && key !== "rack_position") return null;
 
           return (
             <div key={key} className={`flex gap-2 items-center px-2 py-1.5 rounded-md ${editing ? "hover:bg-secondary/30" : ""}`}>
@@ -272,6 +384,8 @@ function EditableDevicePanel({
         })}
       </div>
 
+      <DevicePortsPanel device={currentDevice} />
+
       {onTrace && !editing && (
         <div className="px-3 py-3 border-t border-border">
           <button
@@ -292,7 +406,7 @@ function AddDeviceModal({ onClose }: { onClose: () => void }) {
   const { createDevice } = useDevices();
   const [formData, setFormData] = useState<Omit<Device, "id">>({
     name: "", type: "pc", hostname: "", ip: "", mac: "", vlan: 1, owner: "", room: "", floor: 1,
-    status: "online", rack: "", rack_position: 1, switchPort: "", patchPanel: "", wallJack: ""
+    status: "online", rack: "", rack_position: 1
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -377,7 +491,7 @@ function AddDeviceModal({ onClose }: { onClose: () => void }) {
           </div>
 
           <div className="border-t border-border/60 my-2 pt-2">
-            <span className="text-muted-foreground block text-[10px] font-mono mb-2 uppercase tracking-wide">Infrastructure Port Mapping Layouts</span>
+            <span className="text-muted-foreground block text-[10px] font-mono mb-2 uppercase tracking-wide">Rack Placement</span>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="text-muted-foreground block mb-1">Target Server Rack (ID)</label>
@@ -387,18 +501,9 @@ function AddDeviceModal({ onClose }: { onClose: () => void }) {
                 <label className="text-muted-foreground block mb-1">Rack Unit Slot Position (U)</label>
                 <input type="number" value={formData.rack_position} onChange={e => setField("rack_position", Number(e.target.value))} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" min={1} max={16} />
               </div>
-              <div>
-                <label className="text-muted-foreground block mb-1">Switch Interface Port</label>
-                <input type="text" value={formData.switchPort} onChange={e => setField("switchPort", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" placeholder="Gi1/0/2" />
-              </div>
-              <div>
-                <label className="text-muted-foreground block mb-1">Patch Panel Slot</label>
-                <input type="text" value={formData.patchPanel} onChange={e => setField("patchPanel", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" placeholder="PP-A Port 5" />
-              </div>
-              <div className="col-span-2">
-                <label className="text-muted-foreground block mb-1">Terminal Wall Jack</label>
-                <input type="text" value={formData.wallJack} onChange={e => setField("wallJack", e.target.value)} className="w-full bg-secondary border border-border rounded px-2 py-1.5 font-mono focus:outline-none focus:border-primary/60" placeholder="WJ-B02" />
-              </div>
+            </div>
+            <div className="text-[10px] text-muted-foreground/70 font-mono mt-2">
+              Ports and cable connections are added after the device is created, from its device panel.
             </div>
           </div>
 
@@ -540,11 +645,11 @@ function DashboardView({ onNavigate, onTrace }: { onNavigate: (v: View) => void,
 // ─── Cable Tracer View ────────────────────────────────────────────────────────
 
 function TracerView({ initialDevice }: { initialDevice?: Device | null }) {
-  const { devices } = useDevices();
+  const { devices, ports, traceFromPort } = useDevices();
   const [query, setQuery] = useState(initialDevice?.name ?? "");
   const [results, setResults] = useState<Device[]>([]);
   const [selected, setSelected] = useState<Device | null>(initialDevice ?? null);
-  const [tracePath, setTracePath] = useState<TraceNode[]>([]);
+  const [tracePath, setTracePath] = useState<TraceHop[]>([]);
   const [animStep, setAnimStep] = useState(0);
   const [tracing, setTracing] = useState(false);
   const [editDevice, setEditDevice] = useState<Device | null>(null);
@@ -556,36 +661,44 @@ function TracerView({ initialDevice }: { initialDevice?: Device | null }) {
     wall_jack: "#10b981", server: "#10b981", firewall: "#f43f5e", ups: "#f59e0b",
   };
 
-  const runTrace = (dev: Device) => {
-    const paths = buildTracePaths(devices);
+  const selectedPorts = selected ? ports.filter(p => p.deviceId === selected.id) : [];
+
+  const runTraceFromPort = async (port: Port) => {
+    setTracePath([]);
+    setAnimStep(0);
+    setTracing(true);
+    const hops = await traceFromPort(port.id);
+    setTracePath(hops);
+    let i = 0;
+    const tick = () => { i++; setAnimStep(i); if (i < hops.length) setTimeout(tick, 220); else setTracing(false); };
+    if (hops.length > 0) setTimeout(tick, 150); else setTracing(false);
+  };
+
+  const selectDevice = (dev: Device) => {
     setSelected(dev);
     setResults([]);
     setQuery(dev.name || "");
-    const path = paths[dev.id] || [];
-    setTracePath(path);
+    setTracePath([]);
     setAnimStep(0);
-    setTracing(true);
-    let i = 0;
-    const tick = () => { i++; setAnimStep(i); if (i < path.length) setTimeout(tick, 220); else setTracing(false); };
-    setTimeout(tick, 150);
+    const devPorts = ports.filter(p => p.deviceId === dev.id);
+    if (devPorts.length === 1) runTraceFromPort(devPorts[0]);
   };
 
   useEffect(() => {
-    if (initialDevice) runTrace(initialDevice);
+    if (initialDevice) selectDevice(initialDevice);
     else inputRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (!query.trim()) { setResults([]); return; }
     const q = query.toLowerCase();
     setResults(devices.filter(d =>
-      (d.name && d.name.toLowerCase().includes(q)) || 
-      (d.ip && d.ip.includes(q)) || 
+      (d.name && d.name.toLowerCase().includes(q)) ||
+      (d.ip && d.ip.includes(q)) ||
       (d.mac && d.mac.toLowerCase().includes(q)) ||
-      (d.hostname && d.hostname.toLowerCase().includes(q)) || 
-      (d.owner && d.owner.toLowerCase().includes(q)) ||
-      (d.switchPort && d.switchPort.toLowerCase().includes(q)) ||
-      (d.wallJack && d.wallJack.toLowerCase().includes(q))
+      (d.hostname && d.hostname.toLowerCase().includes(q)) ||
+      (d.owner && d.owner.toLowerCase().includes(q))
     ));
   }, [query, devices]);
 
@@ -595,27 +708,30 @@ function TracerView({ initialDevice }: { initialDevice?: Device | null }) {
     <div className="p-6 max-w-3xl mx-auto space-y-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Cable Tracer</h1>
-        <p className="text-sm text-muted-foreground mt-1">Search any device, port, IP, or MAC to trace its full physical path.</p>
+        <p className="text-sm text-muted-foreground mt-1">Search any device by name, IP, MAC, or hostname to trace a port's full physical path.</p>
       </div>
 
       <div className="relative">
         <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
         <input ref={inputRef} type="text" value={query} onChange={e => setQuery(e.target.value)}
-          placeholder="Search by device name, IP, MAC, hostname, switch port…"
+          placeholder="Search by device name, IP, MAC, hostname…"
           className="w-full pl-10 pr-4 py-3 bg-card border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30 font-mono transition-all" />
         {(query || selected) && (
           <button onClick={reset} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"><X size={16} /></button>
         )}
         {results.length > 0 && (
           <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-border rounded-lg shadow-xl z-30 max-h-60 overflow-y-auto overflow-x-hidden p-1 divide-y divide-border/50">
-            {results.map(d => (
-              <div key={d.id} onClick={() => runTrace(d)} className="flex items-center gap-3 px-3 py-2 hover:bg-secondary/60 cursor-pointer transition-colors text-xs">
-                <span className="text-muted-foreground">{deviceIcon(d.type, 13)}</span>
-                <span className="font-mono text-foreground font-medium truncate max-w-[200px]">{d.name}</span>
-                <span className="text-muted-foreground font-mono truncate flex-1">{d.ip || "No IP"} · {d.hostname || "—"}</span>
-                {d.switchPort && <span className="text-[10px] font-mono bg-primary/10 text-primary border border-primary/20 px-1.5 py-0.5 rounded">Sw: {d.switchPort}</span>}
-              </div>
-            ))}
+            {results.map(d => {
+              const portCount = ports.filter(p => p.deviceId === d.id).length;
+              return (
+                <div key={d.id} onClick={() => selectDevice(d)} className="flex items-center gap-3 px-3 py-2 hover:bg-secondary/60 cursor-pointer transition-colors text-xs">
+                  <span className="text-muted-foreground">{deviceIcon(d.type, 13)}</span>
+                  <span className="font-mono text-foreground font-medium truncate max-w-[200px]">{d.name}</span>
+                  <span className="text-muted-foreground font-mono truncate flex-1">{d.ip || "No IP"} · {d.hostname || "—"}</span>
+                  {portCount > 0 && <span className="text-[10px] font-mono bg-primary/10 text-primary border border-primary/20 px-1.5 py-0.5 rounded">{portCount} port{portCount === 1 ? "" : "s"}</span>}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -635,34 +751,59 @@ function TracerView({ initialDevice }: { initialDevice?: Device | null }) {
             </button>
           </div>
 
-          <div className="relative pl-1">
-            <div className="absolute left-[17px] top-4 bottom-4 w-0.5 bg-slate-800 pointer-events-none" />
-            {tracing && <div className="absolute left-[17px] top-4 w-0.5 bg-gradient-to-b from-primary via-cyan-400 to-transparent h-12 animate-pulse" style={{ top: `${(animStep - 1) * 56}px` }} />}
-            
-            {tracePath.map((node, i) => (
-              <div key={node.id} className="transition-all duration-300 mb-4 last:mb-0" style={{ opacity: i < animStep ? 1 : 0, transform: i < animStep ? "translateX(0)" : "translateX(-8px)" }}>
-                <div className="flex items-start gap-4">
-                  <div className="flex flex-col items-center flex-shrink-0">
-                    <div className="w-9 h-9 rounded-lg flex items-center justify-center border" style={{ backgroundColor: `${nodeColor[node.type]}15`, borderColor: i < animStep ? `${nodeColor[node.type]}50` : "transparent", color: nodeColor[node.type] }}>
-                      {deviceIcon(node.type, 16)}
-                    </div>
-                  </div>
-                  <div className="flex-1">
-                    <div className="bg-card border border-border rounded-lg px-4 py-3 shadow-sm">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-mono text-sm font-medium text-foreground">{node.label}</span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border uppercase tracking-wider" style={{ color: nodeColor[node.type], borderColor: `${nodeColor[node.type]}40`, backgroundColor: `${nodeColor[node.type]}10` }}>
-                          {node.type?.replace("_", " ")}
-                        </span>
+          {selectedPorts.length === 0 ? (
+            <div className="text-xs text-muted-foreground italic border border-dashed border-border rounded-lg p-6 text-center font-mono">
+              No ports registered for this device yet. Add one from "Inspect Node Properties" to enable cable tracing.
+            </div>
+          ) : selectedPorts.length > 1 && tracePath.length === 0 && !tracing ? (
+            <div className="space-y-2">
+              <div className="text-xs text-muted-foreground font-mono">Select a port to trace:</div>
+              <div className="flex flex-wrap gap-2">
+                {selectedPorts.map(p => (
+                  <button key={p.id} onClick={() => runTraceFromPort(p)} className="px-3 py-1.5 bg-card border border-border rounded-lg text-xs font-mono hover:border-primary/50 transition-colors">
+                    {p.portNumber}{p.portType ? ` (${p.portType})` : ""}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="relative pl-1">
+              <div className="absolute left-[17px] top-4 bottom-4 w-0.5 bg-slate-800 pointer-events-none" />
+              {tracing && <div className="absolute left-[17px] top-4 w-0.5 bg-gradient-to-b from-primary via-cyan-400 to-transparent h-12 animate-pulse" style={{ top: `${(animStep - 1) * 56}px` }} />}
+
+              {tracePath.map((hop, i) => (
+                <div key={`${hop.portId}-${hop.hop}`} className="transition-all duration-300 mb-4 last:mb-0" style={{ opacity: i < animStep ? 1 : 0, transform: i < animStep ? "translateX(0)" : "translateX(-8px)" }}>
+                  <div className="flex items-start gap-4">
+                    <div className="flex flex-col items-center flex-shrink-0">
+                      <div className="w-9 h-9 rounded-lg flex items-center justify-center border" style={{ backgroundColor: `${nodeColor[hop.deviceType]}15`, borderColor: i < animStep ? `${nodeColor[hop.deviceType]}50` : "transparent", color: nodeColor[hop.deviceType] }}>
+                        {deviceIcon(hop.deviceType, 16)}
                       </div>
-                      <div className="text-xs text-muted-foreground mt-1 font-mono">{node.detail}</div>
-                      <div className="text-[10px] text-muted-foreground/60 mt-0.5 font-mono">{node.sublabel}</div>
+                    </div>
+                    <div className="flex-1">
+                      <div className="bg-card border border-border rounded-lg px-4 py-3 shadow-sm">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-mono text-sm font-medium text-foreground">{hop.deviceName}</span>
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border uppercase tracking-wider" style={{ color: nodeColor[hop.deviceType], borderColor: `${nodeColor[hop.deviceType]}40`, backgroundColor: `${nodeColor[hop.deviceType]}10` }}>
+                            {hop.deviceType?.replace("_", " ")}
+                          </span>
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1 font-mono">Port {hop.portNumber}</div>
+                        <div className="text-[10px] text-muted-foreground/60 mt-0.5 font-mono">
+                          {hop.connectionId ? `Hop ${hop.hop} · via Connection #${hop.connectionId}` : "Trace start"}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+
+              {!tracing && tracePath.length > 0 && (
+                <div className="text-[10px] text-muted-foreground/60 font-mono pl-[52px] mt-1">
+                  {tracePath.length} hop{tracePath.length === 1 ? "" : "s"} · trace ended {tracePath.length >= 50 ? "(max hop limit reached)" : "(dead end)"}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -782,9 +923,9 @@ function DevicesView({ onTrace }: { onTrace: (d: Device) => void }) {
 // ─── Rack Cabinet Elevation View ──────────────────────────────────────────────
 
 function RackView() {
-  const { devices, updateDevice } = useDevices();
+  const { devices, updateDevice, ports, createPort, createConnection } = useDevices();
   const [currentFloor, setCurrentFloor] = useState<number>(1);
-  
+
   const [rackNames, setRackNames] = useState<Record<string, { east: string; west: string }>>(() => {
     const defaultData: Record<string, { east: string; west: string }> = {};
     [1, 2, 3, 4].forEach(f => {
@@ -814,8 +955,12 @@ function RackView() {
   const [targetRack, setTargetRack] = useState<string>("");
   const [targetPos, setTargetPos] = useState<number>(1);
 
-  const [cableSource, setCableSource] = useState<{ devId: string; port: string } | null>(null);
-  const [cableTarget, setCableTarget] = useState<{ devId: string; port: string } | null>(null);
+  // Patch-bridge mode: pick a source device's port, then a target port
+  // anywhere on the floor, and create a real Connection between them.
+  const [cableSourceDevId, setCableSourceDevId] = useState<string | null>(null);
+  const [sourcePortId, setSourcePortId] = useState<string>("");
+  const [targetPortId, setTargetPortId] = useState<string>("");
+  const [quickPortNumber, setQuickPortNumber] = useState("");
 
   const floorDevices = devices.filter(d => Number(d.floor) === currentFloor);
   const unassignedOnFloor = floorDevices.filter(d => !d.rack || d.rack.trim() === "");
@@ -827,11 +972,10 @@ function RackView() {
     e.preventDefault();
     if (!movingDevice) return;
 
-    // Convert string layout targets cleanly to keep the Pydantic type validator happy
-    await updateDevice(movingDevice.id, { 
-      rack: targetRack.trim() || undefined, 
+    await updateDevice(movingDevice.id, {
+      rack: targetRack.trim(),
       floor: currentFloor,
-      rack_position: targetPos 
+      rack_position: targetPos
     });
 
     setMovingDevice(null);
@@ -843,25 +987,102 @@ function RackView() {
     setTargetPos(dev.rack_position || 1);
   };
 
-  const bridgeCablePatches = async () => {
-    if (!cableSource || !cableTarget) return;
-    const sourceDev = devices.find(d => d.id === cableSource.devId);
-    const targetDev = devices.find(d => d.id === cableTarget.devId);
-    if (!sourceDev || !targetDev) return;
+  // Drag-and-drop: pick a device up from a slot (or the unassigned buffer
+  // stack) and drop it onto another slot. Dropping onto an occupied slot
+  // swaps the two devices; dropping onto the buffer stack un-racks it.
+  const [draggedDeviceId, setDraggedDeviceId] = useState<string | null>(null);
+  const [dragOverKey, setDragOverKey] = useState<string | null>(null);
 
-    await updateDevice(sourceDev.id, {
-      switchPort: cableSource.port,
-      patchPanel: `Patched to ${targetDev.name} (${cableTarget.port})`
-    });
+  const handleDragStart = (e: React.DragEvent, deviceId: string) => {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", deviceId);
+    setDraggedDeviceId(deviceId);
+  };
 
-    await updateDevice(targetDev.id, {
-      switchPort: cableTarget.port,
-      patchPanel: `Patched to ${sourceDev.name} (${cableSource.port})`
-    });
+  const handleDragEnd = () => {
+    setDraggedDeviceId(null);
+    setDragOverKey(null);
+  };
 
-    alert(`Bridged Patch Matrix Link: ${sourceDev.name} [Port ${cableSource.port}] ── ${targetDev.name} [Port ${cableTarget.port}]`);
-    setCableSource(null);
-    setCableTarget(null);
+  const handleSlotDragOver = (e: React.DragEvent, slotKey: string) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dragOverKey !== slotKey) setDragOverKey(slotKey);
+  };
+
+  const handleSlotDragLeave = (slotKey: string) => {
+    setDragOverKey(prev => (prev === slotKey ? null : prev));
+  };
+
+  const handleSlotDrop = async (e: React.DragEvent, cabinetTitle: string, uIndex: number, occupant: Device | undefined) => {
+    e.preventDefault();
+    const deviceId = e.dataTransfer.getData("text/plain") || draggedDeviceId;
+    setDraggedDeviceId(null);
+    setDragOverKey(null);
+    if (!deviceId) return;
+
+    const dragged = devices.find(d => d.id === deviceId);
+    if (!dragged) return;
+    if (occupant && occupant.id === deviceId) return; // dropped on itself, no-op
+
+    const wasRacked = !!(dragged.rack && dragged.rack.trim() !== "");
+
+    if (occupant) {
+      // Swap: occupant takes the dragged device's old spot (or goes to the
+      // buffer stack if the dragged device wasn't racked to begin with).
+      await Promise.all([
+        updateDevice(dragged.id, { rack: cabinetTitle, rack_position: uIndex, floor: currentFloor }),
+        updateDevice(occupant.id, wasRacked
+          ? { rack: dragged.rack, rack_position: dragged.rack_position, floor: currentFloor }
+          : { rack: "", rack_position: 1, floor: currentFloor }),
+      ]);
+    } else {
+      await updateDevice(dragged.id, { rack: cabinetTitle, rack_position: uIndex, floor: currentFloor });
+    }
+  };
+
+  const handleBufferDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dragOverKey !== "buffer") setDragOverKey("buffer");
+  };
+
+  const handleBufferDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    const deviceId = e.dataTransfer.getData("text/plain") || draggedDeviceId;
+    setDraggedDeviceId(null);
+    setDragOverKey(null);
+    if (!deviceId) return;
+    await updateDevice(deviceId, { rack: "", rack_position: 1, floor: currentFloor });
+  };
+
+  const openPatchMode = (dev: Device) => {
+    setCableSourceDevId(dev.id);
+    setSourcePortId("");
+    setTargetPortId("");
+    setQuickPortNumber("");
+  };
+
+  const closePatchMode = () => {
+    setCableSourceDevId(null);
+    setSourcePortId("");
+    setTargetPortId("");
+    setQuickPortNumber("");
+  };
+
+  const sourceDevice = devices.find(d => d.id === cableSourceDevId) || null;
+  const sourcePorts = cableSourceDevId ? ports.filter(p => p.deviceId === cableSourceDevId) : [];
+
+  const handleQuickAddSourcePort = async () => {
+    if (!cableSourceDevId || !quickPortNumber.trim()) return;
+    const port = await createPort(cableSourceDevId, quickPortNumber.trim(), "rj45", "");
+    if (port) { setSourcePortId(port.id); setQuickPortNumber(""); }
+  };
+
+  const handleBridge = async () => {
+    if (!sourcePortId || !targetPortId) return;
+    const connection = await createConnection(sourcePortId, targetPortId, "cat6", "");
+    if (connection) closePatchMode();
   };
 
   const renderCabinet = (title: string, cabinetAssets: Device[], positionKey: "east" | "west") => {
@@ -890,26 +1111,41 @@ function RackView() {
         <div className="w-full border-x-4 border-slate-700 bg-slate-950/60 p-2 space-y-1">
           {slots.map(uIndex => {
             const matchedDevice = cabinetAssets.find(d => d.rack_position !== undefined && Number(d.rack_position) === uIndex);
-            
+            const slotKey = `${title}-${uIndex}`;
+            const isDragOver = dragOverKey === slotKey;
+            const isBeingDragged = matchedDevice && draggedDeviceId === matchedDevice.id;
+
             return (
-              <div key={uIndex} className="flex gap-2 items-center h-9 border border-slate-900/40 rounded px-2 bg-slate-900/20 relative group">
+              <div
+                key={uIndex}
+                className={`flex gap-2 items-center h-9 border rounded px-2 bg-slate-900/20 relative group transition-colors ${isDragOver ? "border-cyan-400 bg-cyan-500/10" : "border-slate-900/40"}`}
+                onDragOver={e => handleSlotDragOver(e, slotKey)}
+                onDragLeave={() => handleSlotDragLeave(slotKey)}
+                onDrop={e => handleSlotDrop(e, title, uIndex, matchedDevice)}
+              >
                 <span className="text-[9px] font-mono text-slate-600 w-4 select-none">{String(uIndex).padStart(2, "0")}U</span>
-                
+
                 {matchedDevice ? (
-                  <div className="flex-1 h-full flex items-center justify-between px-2 bg-primary/10 border border-primary/30 rounded text-xs font-mono text-foreground overflow-hidden">
+                  <div
+                    draggable
+                    onDragStart={e => handleDragStart(e, matchedDevice.id)}
+                    onDragEnd={handleDragEnd}
+                    className={`flex-1 h-full flex items-center justify-between px-2 bg-primary/10 border border-primary/30 rounded text-xs font-mono text-foreground overflow-hidden cursor-grab active:cursor-grabbing transition-opacity ${isBeingDragged ? "opacity-30" : "opacity-100"}`}
+                    title="Drag to move this device to another slot"
+                  >
                     <div className="flex items-center gap-2 truncate">
                       <span className="text-primary flex-shrink-0">{deviceIcon(matchedDevice.type, 12)}</span>
                       <span className="font-semibold truncate text-[11px]">{matchedDevice.name}</span>
                       <span className="text-[10px] text-muted-foreground hidden sm:inline capitalize">({matchedDevice.type})</span>
                     </div>
-                    
+
                     <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button 
-                        onClick={() => setCableSource({ devId: matchedDevice.id, port: `P-${uIndex}` })}
-                        className={`p-1 rounded text-[10px] font-mono border transition-all ${cableSource?.devId === matchedDevice.id ? "bg-amber-500 text-black border-amber-400" : "bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700"}`}
+                      <button
+                        onClick={() => openPatchMode(matchedDevice)}
+                        className={`p-1 rounded text-[10px] font-mono border transition-all ${cableSourceDevId === matchedDevice.id ? "bg-amber-500 text-black border-amber-400" : "bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700"}`}
                         title="Select Interface Port Node Source"
                       >
-                        {cableSource?.devId === matchedDevice.id ? "Source" : "Patch"}
+                        {cableSourceDevId === matchedDevice.id ? "Source" : "Patch"}
                       </button>
 
                       <button onClick={() => initMove(matchedDevice)} className="p-1 bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700 rounded text-[10px]" title="Reallocate Position">
@@ -918,8 +1154,8 @@ function RackView() {
                     </div>
                   </div>
                 ) : (
-                  <div className="flex-1 h-full border border-dashed border-slate-800/40 rounded flex items-center justify-center text-[10px] text-slate-700 font-mono italic select-none">
-                    Available Unit Slot Space
+                  <div className={`flex-1 h-full border border-dashed rounded flex items-center justify-center text-[10px] font-mono italic select-none transition-colors ${isDragOver ? "border-cyan-400/60 text-cyan-400" : "border-slate-800/40 text-slate-700"}`}>
+                    {isDragOver ? "Drop to mount here" : "Available Unit Slot Space"}
                   </div>
                 )}
               </div>
@@ -944,8 +1180,7 @@ function RackView() {
               key={flNum}
               onClick={() => {
                 setCurrentFloor(flNum);
-                setCableSource(null);
-                setCableTarget(null);
+                closePatchMode();
               }}
               className={`px-4 py-1.5 text-xs font-mono font-medium rounded-md transition-all ${currentFloor === flNum ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
             >
@@ -955,46 +1190,69 @@ function RackView() {
         </div>
       </div>
 
-      {cableSource && (
-        <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 space-y-3 animate-fade-in text-xs">
+      {cableSourceDevId && (
+        <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 space-y-3 text-xs">
           <div className="flex items-center justify-between">
             <span className="font-mono font-medium text-amber-400 flex items-center gap-2">
-              <Cable size={14} /> Patches Signal Bridge Mode Active
+              <Cable size={14} /> Patch Bridge Mode Active
             </span>
-            <button onClick={() => { setCableSource(null); setCableTarget(null); }} className="text-muted-foreground hover:text-foreground"><X size={14} /></button>
+            <button onClick={closePatchMode} className="text-muted-foreground hover:text-foreground"><X size={14} /></button>
           </div>
-          
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
             <div>
-              <label className="text-muted-foreground block mb-1">Source Interface Port Node:</label>
-              <div className="bg-secondary border border-border px-3 py-2 rounded font-mono text-foreground">
-                {devices.find(d => d.id === cableSource.devId)?.name} ({cableSource.port})
-              </div>
+              <label className="text-muted-foreground block mb-1">Source Port ({sourceDevice?.name})</label>
+              {sourcePorts.length === 0 ? (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={quickPortNumber}
+                    onChange={e => setQuickPortNumber(e.target.value)}
+                    placeholder="e.g. Gi1/0/2 — this device has no ports yet"
+                    className="flex-1 bg-secondary border border-border rounded px-3 py-2 font-mono text-foreground focus:outline-none focus:border-amber-400"
+                  />
+                  <button
+                    onClick={handleQuickAddSourcePort}
+                    disabled={!quickPortNumber.trim()}
+                    className="px-3 py-2 bg-amber-500 hover:bg-amber-400 text-black font-semibold rounded disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Add
+                  </button>
+                </div>
+              ) : (
+                <select
+                  value={sourcePortId}
+                  onChange={e => setSourcePortId(e.target.value)}
+                  className="w-full bg-secondary border border-border rounded px-3 py-2 text-foreground font-mono focus:outline-none"
+                >
+                  <option value="">Select port…</option>
+                  {sourcePorts.map(p => (
+                    <option key={p.id} value={p.id}>{p.portNumber}{p.portType ? ` (${p.portType})` : ""}</option>
+                  ))}
+                </select>
+              )}
             </div>
 
             <div>
-              <label className="text-muted-foreground block mb-1 font-mono text-amber-300">Target Bridge Connection Endpoint:</label>
+              <label className="text-muted-foreground block mb-1 font-mono text-amber-300">Target Port</label>
               <select
-                onChange={e => {
-                  const [devId, port] = e.target.value.split("::");
-                  setCableTarget({ devId, port });
-                }}
+                value={targetPortId}
+                onChange={e => setTargetPortId(e.target.value)}
                 className="w-full bg-secondary border border-border rounded px-3 py-2 text-foreground font-mono focus:outline-none focus:border-amber-400"
-                defaultValue=""
               >
-                <option value="" disabled>Select Target Asset Destination Link...</option>
-                {floorDevices.filter(d => d.id !== cableSource.devId).map(d => (
-                  <option key={`tgt-${d.id}`} value={`${d.id}::Port-Link`}>
-                    {d.name} [{d.type.toUpperCase()}] — {d.rack || "Unmounted Line Room"}
-                  </option>
-                ))}
+                <option value="">Select target port…</option>
+                {floorDevices.filter(d => d.id !== cableSourceDevId).flatMap(d =>
+                  ports.filter(p => p.deviceId === d.id).map(p => (
+                    <option key={p.id} value={p.id}>{d.name} — {p.portNumber}</option>
+                  ))
+                )}
               </select>
             </div>
           </div>
-          
-          {cableTarget && (
+
+          {sourcePortId && targetPortId && (
             <div className="pt-1 flex justify-end">
-              <button onClick={bridgeCablePatches} className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-black font-semibold font-mono rounded transition-colors">
+              <button onClick={handleBridge} className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-black font-semibold font-mono rounded transition-colors">
                 Bridge Patch Jumper Link
               </button>
             </div>
@@ -1006,19 +1264,31 @@ function RackView() {
         {renderCabinet(activeNames.east, eastRackAssets, "east")}
         {renderCabinet(activeNames.west, westRackAssets, "west")}
 
-        <div className="bg-card border border-border rounded-xl p-4 space-y-4 col-span-1">
+        <div
+          className={`bg-card border rounded-xl p-4 space-y-4 col-span-1 transition-colors ${dragOverKey === "buffer" ? "border-cyan-400/60 bg-cyan-500/5" : "border-border"}`}
+          onDragOver={handleBufferDragOver}
+          onDragLeave={() => handleSlotDragLeave("buffer")}
+          onDrop={handleBufferDrop}
+        >
           <div className="border-b border-border pb-2">
             <span className="text-xs font-mono font-medium text-foreground block">
               Floor 0{currentFloor} Available Buffer Stack
             </span>
             <span className="text-[10px] text-muted-foreground font-mono mt-0.5 block">
-              Assets configured on this floor waiting rack cabinet assignment.
+              Assets configured on this floor waiting rack cabinet assignment. Drag a mounted device here to un-rack it.
             </span>
           </div>
 
           <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
             {unassignedOnFloor.map(dev => (
-              <div key={dev.id} className="p-3 bg-secondary/40 border border-border/80 rounded-lg flex items-center justify-between gap-3 text-xs font-mono">
+              <div
+                key={dev.id}
+                draggable
+                onDragStart={e => handleDragStart(e, dev.id)}
+                onDragEnd={handleDragEnd}
+                className={`p-3 bg-secondary/40 border border-border/80 rounded-lg flex items-center justify-between gap-3 text-xs font-mono cursor-grab active:cursor-grabbing transition-opacity ${draggedDeviceId === dev.id ? "opacity-30" : "opacity-100"}`}
+                title="Drag onto a rack slot to mount"
+              >
                 <div className="truncate min-w-0">
                   <div className="font-semibold text-foreground truncate flex items-center gap-1.5">
                     {deviceIcon(dev.type, 13)} {dev.name}
@@ -1053,12 +1323,12 @@ function RackView() {
               <span className="font-semibold font-mono text-sm">Assign Enclosure: {movingDevice.name}</span>
               <button onClick={() => setMovingDevice(null)} className="text-muted-foreground hover:text-foreground"><X size={14} /></button>
             </div>
-            
+
             <form onSubmit={handlePositionMove} className="p-4 space-y-4">
               <div>
                 <label className="text-muted-foreground block mb-1">Target Cabinet Option Box Selector</label>
-                <select 
-                  value={targetRack} 
+                <select
+                  value={targetRack}
                   onChange={e => setTargetRack(e.target.value)}
                   className="w-full bg-secondary border border-border rounded px-2.5 py-1.5 text-foreground font-mono focus:outline-none"
                 >
@@ -1143,7 +1413,7 @@ function FloorMapView({ onTrace }: { onTrace: (d: Device) => void }) {
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!draggedDevId || !mapContainerRef.current) return;
     const rect = mapContainerRef.current.getBoundingClientRect();
-    
+
     let leftPercent = ((e.clientX - rect.left) / rect.width) * 100;
     let topPercent = ((e.clientY - rect.top) / rect.height) * 100;
 
@@ -1207,7 +1477,7 @@ function FloorMapView({ onTrace }: { onTrace: (d: Device) => void }) {
           <button onClick={handleResetLayout} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono rounded-md border border-border hover:bg-destructive/10 hover:text-destructive hover:border-destructive/30 transition-all text-muted-foreground" >
             <RotateCcw size={12} /> Reset Layout
           </button>
-          
+
           <div className="flex bg-secondary border border-border p-1 rounded-lg select-none">
             {[1, 2, 3, 4].map(fNum => (
               <button key={fNum} onClick={() => { setCurrentFloor(fNum); setSelected(null); }}
@@ -1255,7 +1525,7 @@ function FloorMapView({ onTrace }: { onTrace: (d: Device) => void }) {
         <div ref={mapContainerRef} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
           className="lg:col-span-3 bg-[#0a0f1d] border border-border/80 rounded-xl aspect-[16/10] relative overflow-hidden shadow-2xl group flex items-center justify-center cursor-crosshair"
           style={{ backgroundImage: floorplans[currentFloor] ? `url(${floorplans[currentFloor]})` : "none", backgroundSize: "cover", backgroundPosition: "center" }} >
-          
+
           {!floorplans[currentFloor] && (
             <div className="absolute inset-0 opacity-[0.03] bg-[linear-gradient(to_right,#808080_1px,transparent_1px),linear-gradient(to_bottom,#808080_1px,transparent_1px)] bg-[size:24px_24px] pointer-events-none" />
           )}
@@ -1264,7 +1534,7 @@ function FloorMapView({ onTrace }: { onTrace: (d: Device) => void }) {
             <div className="absolute top-0 bottom-0 left-[35%] w-px bg-slate-800/40 border-dashed pointer-events-none" />
             <div className="absolute top-0 bottom-0 left-[65%] w-px bg-slate-800/40 border-dashed pointer-events-none" />
             <div className="absolute left-0 right-0 top-[50%] h-px bg-slate-800/40 border-dashed pointer-events-none" />
-            
+
             {!floorplans[currentFloor] && (
               <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-xs font-mono text-muted-foreground/50 pointer-events-none select-none">
                 <Map size={24} strokeWidth={1.2} className="mb-2 text-muted-foreground/30 animate-pulse" />
@@ -1275,18 +1545,18 @@ function FloorMapView({ onTrace }: { onTrace: (d: Device) => void }) {
             {placedDevices.map(dev => {
               const pos = activeFloorDots[dev.id] || { top: "50%", left: "50%" };
               const isSel = selected?.id === dev.id;
-              
+
               return (
                 <div key={dev.id} onMouseDown={(e) => handleMouseDown(dev.id, e)}
                   className={`absolute w-7 h-7 rounded-lg flex items-center justify-center cursor-grab active:cursor-grabbing border shadow-md transition-shadow select-none group/dot z-10`}
                   style={{ top: pos.top, left: pos.left, transform: "translate(-50%, -50%)", backgroundColor: isSel ? "#10b981" : "#1e293b", borderColor: isSel ? "#34d399" : "#334155", color: isSel ? "#0f172a" : "#cbd5e1" }}>
-                  
+
                   {deviceIcon(dev.type, 13)}
-                  
+
                   <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-0.5 bg-slate-950 text-[10px] text-slate-200 rounded shadow-xl border border-slate-800 opacity-0 group-hover/dot:opacity-100 pointer-events-none font-mono whitespace-nowrap transition-opacity">
                     {dev.name}
                   </div>
-                  
+
                   <button onClick={(e) => removeDot(dev.id, e)}
                     className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 rounded-full bg-destructive text-destructive-foreground border border-border items-center justify-center hidden group-hover/dot:flex hover:scale-105 transition-transform">
                     <X size={8} />
@@ -1354,7 +1624,7 @@ function Sidebar({
           );
         })}
       </nav>
-      
+
       {!collapsed && (
         <div className="p-3 border-t border-border bg-secondary/20 font-mono text-[10px] text-muted-foreground/70 flex flex-col gap-0.5 select-none flex-shrink-0">
           <div>Topology Core Engine: v2.4.0</div>
@@ -1367,67 +1637,76 @@ function Sidebar({
 
 // ─── Main Orchestrator Application Frame ──────────────────────────────────────
 
+const API_BASE = "http://localhost:8000";
+
 export default function App() {
   const [devices, setDevices] = useState<Device[]>([]);
+  const [ports, setPorts] = useState<Port[]>([]);
+  const [connections, setConnections] = useState<Connection[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<View>("dashboard");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [traceTarget, setTraceTarget] = useState<Device | null>(null);
 
-  const fetchDevices = async (isInitial = false) => {
+  const mapDevice = (d: any): Device => ({
+    id: String(d.id),
+    name: d.name,
+    type: d.device_type,
+    hostname: d.hostname || "",
+    ip: d.ip_address || "",
+    mac: d.mac_address || "",
+    vlan: d.vlan || 1,
+    owner: d.owner || "",
+    room: d.room || "",
+    floor: d.floor || 1,
+    rack: d.rack || "",
+    rack_position: d.rack_position || undefined,
+    status: d.status,
+  });
+
+  const mapPort = (p: any): Port => ({
+    id: String(p.id),
+    deviceId: String(p.device_id),
+    portNumber: p.port_number,
+    portType: p.port_type || "",
+    notes: p.notes || "",
+  });
+
+  const mapConnection = (c: any): Connection => ({
+    id: String(c.id),
+    portAId: String(c.port_a_id),
+    portBId: String(c.port_b_id),
+    cableType: c.cable_type,
+    cableLabel: c.cable_label || "",
+    notes: c.notes || "",
+  });
+
+  const fetchAll = async (isInitial = false) => {
     try {
       if (isInitial) setLoading(true);
-      const response = await axios.get("http://localhost:8000/devices/");
-      
-      const mappedDevices: Device[] = response.data.map((d: any) => {
-        let cleanRack = d.rack_id ? String(d.rack_id) : (d.rack || "");
-        if (cleanRack.match(/^\d+$/)) {
-          cleanRack = d.rack || `Cabinet-${cleanRack}`;
-        }
-        
-        return {
-          id: String(d.id),
-          name: d.name,
-          type: d.device_type,
-          hostname: d.hostname || "",
-          ip: d.ip_address || "",
-          mac: d.mac_address || "",
-          vlan: d.vlan || 1,
-          owner: d.owner || "",
-          room: d.room_id ? String(d.room_id) : (d.room || ""),
-          floor: d.floor || 1,
-          rack: d.rack || cleanRack,
-          rack_position: d.rack_position || undefined,
-          status: d.status,
-          switchPort: d.switch_port || "",
-          patchPanel: d.patch_panel || "",
-          wallJack: d.wall_jack || "",
-        };
-      });
-      setDevices(mappedDevices);
+      const [devicesRes, portsRes, connectionsRes] = await Promise.all([
+        axios.get(`${API_BASE}/devices/`),
+        axios.get(`${API_BASE}/ports/`),
+        axios.get(`${API_BASE}/connections/`),
+      ]);
+      setDevices(devicesRes.data.map(mapDevice));
+      setPorts(portsRes.data.map(mapPort));
+      setConnections(connectionsRes.data.map(mapConnection));
     } catch (error) {
-      console.error("Error fetching operational devices array sequence:", error);
+      console.error("Error fetching NetMap topology data:", error);
     } finally {
-      if (isInitial) {
-        setLoading(false);
-      }
+      if (isInitial) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchDevices(true);
+    fetchAll(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const updateDevice = async (id: string, patch: Partial<Device>) => {
     try {
       const payload: any = {};
-      
-      // Clean up inputs so integer relationship columns pass standard backend structural tests
-      const cleanStringId = (str: string | undefined): number | string | null => {
-        if (!str || str.trim() === "") return null;
-        const matchedDigits = str.replace(/\D/g, "");
-        return matchedDigits ? parseInt(matchedDigits, 10) : str;
-      };
 
       if (patch.name !== undefined) payload.name = patch.name;
       if (patch.type !== undefined) payload.device_type = patch.type;
@@ -1436,43 +1715,31 @@ export default function App() {
       if (patch.mac !== undefined) payload.mac_address = patch.mac === "" ? null : patch.mac;
       if (patch.vlan !== undefined) payload.vlan = patch.vlan;
       if (patch.owner !== undefined) payload.owner = patch.owner === "" ? null : patch.owner;
-      
-      // Fixed: Map layout text definitions to safe Pydantic structural types 
-      if (patch.room !== undefined) payload.room_id = cleanStringId(patch.room);
+      if (patch.room !== undefined) payload.room = patch.room === "" ? null : patch.room;
+      if (patch.rack !== undefined) payload.rack = patch.rack === "" ? null : patch.rack;
       if (patch.floor !== undefined) payload.floor = patch.floor;
-      if (patch.rack !== undefined) payload.rack_id = cleanStringId(patch.rack);
       if (patch.rack_position !== undefined) payload.rack_position = patch.rack_position;
-      
       if (patch.status !== undefined) payload.status = patch.status;
-      if (patch.switchPort !== undefined) payload.switch_port = patch.switchPort === "" ? null : patch.switchPort;
-      if (patch.patchPanel !== undefined) payload.patch_panel = patch.patchPanel === "" ? null : patch.patchPanel;
-      if (patch.wallJack !== undefined) payload.wall_jack = patch.wallJack === "" ? null : patch.wallJack;
 
-      await axios.patch(`http://localhost:8000/devices/${id}`, payload);
-      await fetchDevices(false);
+      await axios.patch(`${API_BASE}/devices/${id}`, payload);
+      await fetchAll(false);
     } catch (error) {
-      console.error("Failed to update operational device node patch data:", error);
+      console.error("Failed to update device:", error);
     }
   };
 
   const deleteDevice = async (id: string) => {
     try {
-      await axios.delete(`http://localhost:8000/devices/${id}`);
-      await fetchDevices(false);
+      await axios.delete(`${API_BASE}/devices/${id}`);
+      await fetchAll(false);
     } catch (error) {
-      console.error("Failed to delete hardware entry node reference:", error);
+      console.error("Failed to delete device:", error);
     }
   };
 
   const createDevice = async (newDevice: Omit<Device, "id">) => {
     try {
       const clean = (val: string) => (val === "" || val === undefined || val === null ? null : val);
-      
-      const cleanStringId = (str: string | undefined): number | string | null => {
-        if (!str || str.trim() === "") return null;
-        const matchedDigits = str.replace(/\D/g, "");
-        return matchedDigits ? parseInt(matchedDigits, 10) : str;
-      };
 
       const payload = {
         name: newDevice.name,
@@ -1482,24 +1749,97 @@ export default function App() {
         ip_address: clean(newDevice.ip),
         mac_address: clean(newDevice.mac),
         owner: clean(newDevice.owner),
-        room_id: cleanStringId(newDevice.room),
-        floor: newDevice.floor,
-        rack_id: cleanStringId(newDevice.rack),
+        room: clean(newDevice.room),
+        rack: clean(newDevice.rack),
+        floor: newDevice.floor || 1,
         rack_position: newDevice.rack_position || 1,
-        switch_port: clean(newDevice.switchPort),
-        patch_panel: clean(newDevice.patchPanel),
-        wall_jack: clean(newDevice.wallJack),
-        vlan: newDevice.vlan || 1
+        vlan: newDevice.vlan || 1,
       };
 
-      await axios.post("http://localhost:8000/devices/", payload);
-      await fetchDevices(false);
+      await axios.post(`${API_BASE}/devices/`, payload);
+      await fetchAll(false);
     } catch (error: any) {
       if (error.response && error.response.status === 422) {
-        alert(`FastAPI validation failure layer rejected input parameters. Invalid data provided: ${JSON.stringify(error.response.data.detail)}`);
+        alert(`Validation error: ${JSON.stringify(error.response.data.detail)}`);
       } else {
         console.error("Failed to add device:", error);
       }
+    }
+  };
+
+  const createPort = async (deviceId: string, portNumber: string, portType: string, notes: string): Promise<Port | null> => {
+    try {
+      const res = await axios.post(`${API_BASE}/ports/`, {
+        device_id: Number(deviceId),
+        port_number: portNumber,
+        port_type: portType || null,
+        notes: notes || null,
+      });
+      await fetchAll(false);
+      return mapPort(res.data);
+    } catch (error: any) {
+      if (error.response && error.response.status === 409) {
+        alert("This device already has a port with that number.");
+      } else {
+        console.error("Failed to create port:", error);
+      }
+      return null;
+    }
+  };
+
+  const deletePort = async (portId: string) => {
+    try {
+      await axios.delete(`${API_BASE}/ports/${portId}`);
+      await fetchAll(false);
+    } catch (error) {
+      console.error("Failed to delete port:", error);
+    }
+  };
+
+  const createConnection = async (portAId: string, portBId: string, cableType: string, cableLabel: string): Promise<Connection | null> => {
+    try {
+      const res = await axios.post(`${API_BASE}/connections/`, {
+        port_a_id: Number(portAId),
+        port_b_id: Number(portBId),
+        cable_type: cableType || "cat6",
+        cable_label: cableLabel || null,
+      });
+      await fetchAll(false);
+      return mapConnection(res.data);
+    } catch (error: any) {
+      if (error.response && (error.response.status === 409 || error.response.status === 400)) {
+        alert(error.response.data.detail || "Could not create that connection.");
+      } else {
+        console.error("Failed to create connection:", error);
+      }
+      return null;
+    }
+  };
+
+  const deleteConnection = async (connectionId: string) => {
+    try {
+      await axios.delete(`${API_BASE}/connections/${connectionId}`);
+      await fetchAll(false);
+    } catch (error) {
+      console.error("Failed to delete connection:", error);
+    }
+  };
+
+  const traceFromPort = async (portId: string): Promise<TraceHop[]> => {
+    try {
+      const res = await axios.get(`${API_BASE}/trace/${portId}`);
+      return (res.data.hops || []).map((h: any) => ({
+        hop: h.hop,
+        portId: String(h.port_id),
+        portNumber: h.port_number,
+        deviceId: String(h.device_id),
+        deviceName: h.device_name,
+        deviceType: h.device_type,
+        connectionId: h.connection_id !== null && h.connection_id !== undefined ? String(h.connection_id) : null,
+      }));
+    } catch (error) {
+      console.error("Failed to trace cable:", error);
+      return [];
     }
   };
 
@@ -1519,7 +1859,12 @@ export default function App() {
   }
 
   return (
-    <DeviceContext.Provider value={{ devices, updateDevice, deleteDevice, createDevice }}>
+    <DeviceContext.Provider value={{
+      devices, ports, connections,
+      updateDevice, deleteDevice, createDevice,
+      createPort, deletePort, createConnection, deleteConnection,
+      traceFromPort,
+    }}>
       <div className="flex h-screen bg-background overflow-hidden" style={{ fontFamily: "'Inter', sans-serif" }}>
         <Sidebar view={view} onNavigate={setView} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(c => !c)} />
         <main className="flex-1 overflow-y-auto min-w-0">
